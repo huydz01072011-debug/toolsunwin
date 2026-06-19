@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3001;
 
 // ==================== CẤU HÌNH ====================
 const API_URL = 'https://wtxmd52.tele68.com/v1/txmd5/sessions';
-const POLL_INTERVAL = 2500; // 2.5 giây
+const POLL_INTERVAL = 3000; // 3 giây
 const MAX_HISTORY = 100000;
 
 // ==================== DỮ LIỆU CHÍNH ====================
@@ -23,14 +23,17 @@ let apiResponseData = {
     id: '@HuyDaiXuVN',
     server_time: new Date().toISOString()
 };
-let latestSessionId = 0;                     // ID lớn nhất đã thấy
-const patternHistory = [];                   // { session, dice, total, result, timestamp }
+let latestSessionId = 0;
+const patternHistory = [];          // { session, dice, total, result, timestamp }
+const MAX_PREDICTIONS = 0;          // không giới hạn, lưu tất cả
+const predictions = [];             // lịch sử dự đoán { Phien_du_doan, Du_doan, Do_tin_cay, Thoi_gian_du_doan, Ket_qua_thuc_te, Dung_hay_sai }
+let pendingPrediction = null;       // dự đoán đang chờ kết quả
 
-// ==================== AI ENSEMBLE (giữ nguyên từ phiên bản trước) ====================
+// ==================== AI ENSEMBLE SIÊU VIP ====================
 class MarkovModel {
     constructor(order) {
         this.order = order;
-        this.chain = new Map();
+        this.chain = new Map(); // state -> { T: count, X: count }
     }
     learn(history, result) {
         if (history.length < this.order) return;
@@ -41,13 +44,14 @@ class MarkovModel {
     }
     predict(history) {
         if (history.length < this.order) return null;
+        // Back-off: giảm bậc đến khi tìm thấy state
         for (let len = this.order; len >= 1; len--) {
             const state = history.slice(-len).join('');
             if (this.chain.has(state)) {
                 const counts = this.chain.get(state);
                 if (counts.T > counts.X) return 'T';
                 if (counts.X > counts.T) return 'X';
-                return null;
+                return null; // hoà
             }
         }
         return null;
@@ -56,7 +60,7 @@ class MarkovModel {
 
 class StreakDetector {
     constructor() {
-        this.mode = null;
+        this.mode = null; // 'bet_T', 'bet_X', 'one_one', 'two_one'
     }
     detect(history) {
         const len = history.length;
@@ -78,7 +82,7 @@ class StreakDetector {
             case 'bet_T': return 'T';
             case 'bet_X': return 'X';
             case 'one_one': return last === 'T' ? 'X' : 'T';
-            case 'two_one': return last === 'T' ? 'X' : 'T';
+            case 'two_one': return last === 'T' ? 'X' : 'T'; // mẫu 2-1 đơn giản
             default: return null;
         }
     }
@@ -101,29 +105,34 @@ class RecentTrendAnalyzer {
 
 class EnsembleAI {
     constructor() {
-        this.MARKOV_ORDERS = [1,2,3,4,5,6,7,8,9,10];
+        this.MARKOV_ORDERS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         this.markovModels = this.MARKOV_ORDERS.map(order => new MarkovModel(order));
         this.streakDetector = new StreakDetector();
         this.trendAnalyzer = new RecentTrendAnalyzer(20);
-        this.resultHistory = [];
+        this.resultHistory = []; // mảng 'T' / 'X'
+
+        // Lưu điểm số gần đây (cửa sổ 100)
         this.modelScores = {
-            markov: this.MARKOV_ORDERS.map(() => []),
+            markov: this.MARKOV_ORDERS.map(() => []), // mỗi mảng { correct: bool }
             streak: [],
             trend: []
         };
         this.WINDOW = 100;
-        this.pendingPreds = null;
+        this.pendingPreds = null; // lưu dự đoán của từng model trước khi có kết quả
     }
 
     update(actual) {
         if (this.resultHistory.length >= MAX_HISTORY) this.resultHistory.shift();
         this.resultHistory.push(actual);
 
+        // Huấn luyện từng Markov model
         for (const mm of this.markovModels) {
             mm.learn(this.resultHistory, actual);
         }
+        // Cập nhật streak detector
         this.streakDetector.detect(this.resultHistory);
 
+        // Đánh giá dự đoán trước đó
         if (this.pendingPreds) {
             for (let i = 0; i < this.markovModels.length; i++) {
                 const pred = this.pendingPreds.markov[i];
@@ -145,12 +154,15 @@ class EnsembleAI {
     }
 
     predict() {
+        // Dự đoán từ từng model
         const markovPreds = this.markovModels.map(mm => mm.predict(this.resultHistory));
         const streakPred = this.streakDetector.predict(this.resultHistory);
         const trendPred = this.trendAnalyzer.predict(this.resultHistory);
         this.pendingPreds = { markov: markovPreds, streak: streakPred, trend: trendPred };
 
+        // Trọng số dựa trên accuracy gần đây
         const weights = this._getWeights();
+
         const votes = { T: 0, X: 0 };
         for (let i = 0; i < markovPreds.length; i++) {
             if (markovPreds[i]) votes[markovPreds[i]] += weights.markov[i];
@@ -181,7 +193,7 @@ class EnsembleAI {
         const markovAcc = this.modelScores.markov.map(scores => calcAcc(scores));
         const streakAcc = calcAcc(this.modelScores.streak);
         const trendAcc = calcAcc(this.modelScores.trend);
-        const totalAcc = markovAcc.reduce((a,b)=>a+b,0) + streakAcc + trendAcc;
+        const totalAcc = markovAcc.reduce((a, b) => a + b, 0) + streakAcc + trendAcc;
         if (totalAcc === 0) {
             return {
                 markov: this.MARKOV_ORDERS.map(() => 1 / this.MARKOV_ORDERS.length),
@@ -204,22 +216,23 @@ class EnsembleAI {
             markov_models: this.markovModels.map((mm, i) => ({
                 order: mm.order,
                 states: mm.chain.size,
-                accuracy: this.modelScores.markov[i].length ?
-                    (this.modelScores.markov[i].filter(s => s.correct).length / this.modelScores.markov[i].length).toFixed(2) : 0
+                accuracy: this.modelScores.markov[i].length
+                    ? (this.modelScores.markov[i].filter(s => s.correct).length / this.modelScores.markov[i].length).toFixed(2)
+                    : 0
             })),
-            streak_accuracy: this.modelScores.streak.length ?
-                (this.modelScores.streak.filter(s => s.correct).length / this.modelScores.streak.length).toFixed(2) : 0,
-            trend_accuracy: this.modelScores.trend.length ?
-                (this.modelScores.trend.filter(s => s.correct).length / this.modelScores.trend.length).toFixed(2) : 0
+            streak_accuracy: this.modelScores.streak.length
+                ? (this.modelScores.streak.filter(s => s.correct).length / this.modelScores.streak.length).toFixed(2)
+                : 0,
+            trend_accuracy: this.modelScores.trend.length
+                ? (this.modelScores.trend.filter(s => s.correct).length / this.modelScores.trend.length).toFixed(2)
+                : 0
         };
     }
 }
 
 const ai = new EnsembleAI();
-let pendingPrediction = null;   // { Phien_du_doan, Du_doan, Do_tin_cay, Thoi_gian_du_doan, Ket_qua_thuc_te, Dung_hay_sai }
-const predictions = [];         // lịch sử các dự đoán đã kiểm chứng
 
-// ==================== THU THẬP DỮ LIỆU TỪ REST API ====================
+// ==================== HÀM GỌI API ====================
 function fetchSessions() {
     return new Promise((resolve, reject) => {
         https.get(API_URL, (res) => {
@@ -235,88 +248,96 @@ function fetchSessions() {
     });
 }
 
-async function pollData() {
+// ==================== XỬ LÝ DỮ LIỆU MỚI ====================
+async function processNewSessions(sessions) {
+    // Lọc các phiên mới hơn latestSessionId, sắp xếp tăng dần
+    const newSessions = sessions
+        .filter(s => s.id > latestSessionId)
+        .sort((a, b) => a.id - b.id);
+
+    if (newSessions.length === 0) return;
+
+    for (const s of newSessions) {
+        const result = s.resultTruyenThong === 'TAI' ? 'Tài' : 'Xỉu';
+        const total = s.point;
+        const dice = s.dices;
+
+        // Cập nhật dữ liệu mới nhất
+        apiResponseData = {
+            Phien: s.id,
+            Xuc_xac_1: dice[0],
+            Xuc_xac_2: dice[1],
+            Xuc_xac_3: dice[2],
+            Tong: total,
+            Ket_qua: result,
+            id: '@cskh_huydaixu',
+            server_time: new Date().toISOString(),
+            update_count: (apiResponseData.update_count || 0) + 1
+        };
+
+        // Thêm vào lịch sử chi tiết
+        patternHistory.push({
+            session: s.id,
+            dice: dice,
+            total: total,
+            result: result,
+            timestamp: new Date().toISOString()
+        });
+        if (patternHistory.length > MAX_HISTORY) patternHistory.shift();
+
+        // Huấn luyện AI
+        ai.update(result === 'Tài' ? 'T' : 'X');
+
+        // Kiểm tra dự đoán đang chờ
+        if (pendingPrediction && pendingPrediction.Phien_du_doan === s.id) {
+            pendingPrediction.Ket_qua_thuc_te = result;
+            pendingPrediction.Dung_hay_sai = (pendingPrediction.Du_doan === result);
+            predictions.push({ ...pendingPrediction });
+            pendingPrediction = null;
+        } else if (pendingPrediction && pendingPrediction.Phien_du_doan < s.id) {
+            // Phiên bị nhảy, dự đoán cũ không còn hợp lệ, hủy bỏ
+            pendingPrediction = null;
+        }
+
+        latestSessionId = s.id;
+    }
+
+    // Tạo dự đoán mới cho phiên tiếp theo
+    if (latestSessionId > 0) {
+        const nextSession = latestSessionId + 1;
+        const { prediction, confidence } = ai.predict();
+        pendingPrediction = {
+            Phien_du_doan: nextSession,
+            Du_doan: prediction,
+            Do_tin_cay: confidence,
+            Thoi_gian_du_doan: new Date().toISOString(),
+            Ket_qua_thuc_te: null,
+            Dung_hay_sai: null
+        };
+    }
+}
+
+// ==================== KHỞI TẠO DỮ LIỆU BAN ĐẦU ====================
+(async () => {
     try {
         const sessions = await fetchSessions();
-        // Lọc các phiên mới (id > latestSessionId), sắp xếp tăng dần theo id
-        const newSessions = sessions
-            .filter(s => s.id > latestSessionId)
-            .sort((a, b) => a.id - b.id);
-
-        if (newSessions.length === 0) return;
-
-        for (const s of newSessions) {
+        // Sắp xếp tăng dần để huấn luyện đúng thứ tự
+        const sorted = sessions.sort((a, b) => a.id - b.id);
+        for (const s of sorted) {
             const result = s.resultTruyenThong === 'TAI' ? 'Tài' : 'Xỉu';
-            const total = s.point;
-            const dice = s.dices;
-
-            // Cập nhật API response
-            apiResponseData = {
-                Phien: s.id,
-                Xuc_xac_1: dice[0],
-                Xuc_xac_2: dice[1],
-                Xuc_xac_3: dice[2],
-                Tong: total,
-                Ket_qua: result,
-                id: '@cskh_huydaixu',
-                server_time: new Date().toISOString(),
-                update_count: (apiResponseData.update_count || 0) + 1
-            };
-
-            // Lưu lịch sử
+            ai.update(result === 'Tài' ? 'T' : 'X'); // huấn luyện AI
             patternHistory.push({
                 session: s.id,
-                dice: dice,
-                total: total,
+                dice: s.dices,
+                total: s.point,
                 result: result,
                 timestamp: new Date().toISOString()
             });
             if (patternHistory.length > MAX_HISTORY) patternHistory.shift();
-
-            // Cập nhật AI
-            ai.update(result === 'Tài' ? 'T' : 'X');
-
-            // Kiểm tra pending prediction
-            if (pendingPrediction && pendingPrediction.Phien_du_doan === s.id) {
-                pendingPrediction.Ket_qua_thuc_te = result;
-                pendingPrediction.Dung_hay_sai = (pendingPrediction.Du_doan === result);
-                predictions.push({ ...pendingPrediction });
-                pendingPrediction = null;
-            }
-
-            latestSessionId = s.id;
         }
-        console.log(`[📡] Đã cập nhật ${newSessions.length} phiên mới. Phiên mới nhất: ${latestSessionId}`);
-    } catch (err) {
-        console.error('[❌] Lỗi fetch API:', err.message);
-    }
-}
-
-// ==================== KHỞI ĐỘNG LẤY DỮ LIỆU BAN ĐẦU ====================
-(async () => {
-    // Lấy toàn bộ phiên lần đầu (tối đa 105) và huấn luyện AI
-    try {
-        const sessions = await fetchSessions();
-        if (sessions.length > 0) {
-            const sorted = sessions.sort((a, b) => a.id - b.id);
-            // Huấn luyện tuần tự
-            for (const s of sorted) {
-                const result = s.resultTruyenThong === 'TAI' ? 'Tài' : 'Xỉu';
-                ai.update(result === 'Tài' ? 'T' : 'X'); // chỉ cập nhật AI, không lưu history ở đây để tránh trùng
-            }
-            // Lưu lịch sử chi tiết
-            sorted.forEach(s => {
-                patternHistory.push({
-                    session: s.id,
-                    dice: s.dices,
-                    total: s.point,
-                    result: s.resultTruyenThong === 'TAI' ? 'Tài' : 'Xỉu',
-                    timestamp: new Date().toISOString()
-                });
-            });
-            // Cập nhật latestSessionId và API response
+        if (sorted.length > 0) {
+            latestSessionId = sorted[sorted.length - 1].id;
             const latest = sorted[sorted.length - 1];
-            latestSessionId = latest.id;
             apiResponseData = {
                 Phien: latest.id,
                 Xuc_xac_1: latest.dices[0],
@@ -328,16 +349,36 @@ async function pollData() {
                 server_time: new Date().toISOString(),
                 update_count: sorted.length
             };
-            console.log(`[📚] Đã nạp ${sorted.length} phiên ban đầu.`);
+            // Tạo dự đoán đầu tiên
+            const nextSession = latestSessionId + 1;
+            const { prediction, confidence } = ai.predict();
+            pendingPrediction = {
+                Phien_du_doan: nextSession,
+                Du_doan: prediction,
+                Do_tin_cay: confidence,
+                Thoi_gian_du_doan: new Date().toISOString(),
+                Ket_qua_thuc_te: null,
+                Dung_hay_sai: null
+            };
         }
+        console.log(`[📚] Đã nạp ${sorted.length} phiên ban đầu. Phiên mới nhất: ${latestSessionId}`);
     } catch (e) {
-        console.error('[❌] Lỗi khởi tạo dữ liệu:', e);
+        console.error('[❌] Lỗi khởi tạo:', e.message);
     }
-    // Bắt đầu poll định kỳ
-    setInterval(pollData, POLL_INTERVAL);
+
+    // Bắt đầu poll định kỳ mỗi 3 giây
+    setInterval(async () => {
+        try {
+            const sessions = await fetchSessions();
+            await processNewSessions(sessions);
+        } catch (e) {
+            console.error('[❌] Lỗi polling:', e.message);
+        }
+    }, POLL_INTERVAL);
 })();
 
-// ==================== API ENDPOINTS ====================
+// ==================== ENDPOINTS ====================
+
 app.get('/api/ditmemaysun', (req, res) => res.json(apiResponseData));
 
 app.get('/api/sunwin/history', (req, res) => {
@@ -357,21 +398,20 @@ app.get('/api/sunwin/history', (req, res) => {
 });
 
 app.get('/api/sunwin/dudoan', (req, res) => {
-    if (patternHistory.length === 0) return res.json({ message: 'Chưa có dữ liệu.' });
+    if (patternHistory.length === 0) return res.json({ message: 'Chưa có dữ liệu' });
     const latest = patternHistory[patternHistory.length - 1];
-    const nextSession = latest.session + 1;
-
-    // Tạo dự đoán mới
+    const next = latest.session + 1;
+    // Tạo dự đoán mới (có thể trùng với pending nếu chưa có phiên mới)
     const { prediction, confidence } = ai.predict();
+    // Cập nhật pending dự đoán mới
     pendingPrediction = {
-        Phien_du_doan: nextSession,
+        Phien_du_doan: next,
         Du_doan: prediction,
         Do_tin_cay: confidence,
         Thoi_gian_du_doan: new Date().toISOString(),
         Ket_qua_thuc_te: null,
         Dung_hay_sai: null
     };
-
     res.json({
         Ket_qua: latest.result,
         Phien: latest.session,
@@ -379,7 +419,7 @@ app.get('/api/sunwin/dudoan', (req, res) => {
         Xuc_xac_2: latest.dice[1],
         Xuc_xac_3: latest.dice[2],
         Tong: latest.total,
-        Phien_hien_tai: nextSession,
+        Phien_hien_tai: next,
         Du_doan: prediction,
         Do_tin_cay: confidence
     });
@@ -395,7 +435,8 @@ app.get('/api/check', (req, res) => {
             Du_doan: p.Du_doan,
             'Kết quả': p.Ket_qua_thuc_te,
             Đúng: p.Dung_hay_sai,
-            'Độ tin cậy': p.Do_tin_cay
+            'Độ tin cậy': p.Do_tin_cay,
+            'Thời gian': p.Thoi_gian_du_doan
         })),
         stats: { total, correct, incorrect: total - correct, accuracy: parseFloat(accuracy) },
         pending: pendingPrediction ? {
@@ -414,7 +455,7 @@ app.get('/api/health', (req, res) => {
         data_source: 'REST',
         history_count: patternHistory.length,
         ai_enabled: true,
-        uptime: process.uptime()
+        uptime: process.uptime().toFixed(0) + 's'
     });
 });
 
@@ -427,54 +468,60 @@ app.get('/', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html>
 <head>
-    <title>Sun.Win AI REST VIP</title>
+    <title>Sun.Win AI REST Super VIP</title>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: Arial; margin:20px; background:#0a0a0a; color:#0f0; }
+        body { font-family: Arial, sans-serif; margin:20px; background:#0a0a0a; color:#0f0; }
         .container { max-width:1000px; margin:0 auto; }
         .header { background:#111; padding:20px; border-radius:10px; text-align:center; margin-bottom:20px; }
         .box { background:#111; padding:20px; border-radius:10px; margin:10px 0; }
         .live-data { font-size:2em; font-weight:bold; }
         .tai { color:#0f0; } .xiu { color:#f00; }
         a { color:#0ff; }
+        .btn { display:inline-block; background:#222; padding:10px 20px; margin:5px; border-radius:5px; text-decoration:none; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🔴 Sun.Win AI REST Super VIP</h1>
-            <p>Ensemble Markov + Streak + Trend | 100k phiên</p>
+            <p>Ensemble AI: 10 Markov + Streak + Trend | Tự học 100.000 phiên</p>
             <p>Server: ${ip}:${PORT}</p>
         </div>
         <div class="box">
             <h2>🎲 Kết quả mới nhất</h2>
             <div class="live-data ${resultClass}">${resultHtml}</div>
-            <p>Phiên: ${apiResponseData.Phien || 'N/A'}</p>
+            <p>Phiên: ${apiResponseData.Phien || 'N/A'} | Cập nhật: ${apiResponseData.server_time || 'N/A'}</p>
         </div>
         <div class="box">
             <h2>📡 API VIP</h2>
-            <ul>
-                <li><a href="/api/ditmemaysun">/api/ditmemaysun</a> - JSON mới nhất</li>
-                <li><a href="/api/sunwin/history?limit=20">/api/sunwin/history</a> - Lịch sử (100k)</li>
-                <li><a href="/api/sunwin/dudoan">/api/sunwin/dudoan</a> - Dự đoán phiên kế tiếp</li>
-                <li><a href="/api/check">/api/check</a> - Kiểm tra dự đoán đúng/sai</li>
-                <li><a href="/api/ai/status">/api/ai/status</a> - Trạng thái AI</li>
-                <li><a href="/api/health">/api/health</a> - Health check</li>
-            </ul>
+            <a class="btn" href="/api/ditmemaysun" target="_blank">/api/ditmemaysun</a>
+            <a class="btn" href="/api/sunwin/history?limit=20" target="_blank">/api/sunwin/history</a>
+            <a class="btn" href="/api/sunwin/dudoan" target="_blank">/api/sunwin/dudoan</a>
+            <a class="btn" href="/api/check" target="_blank">/api/check</a>
+            <a class="btn" href="/api/ai/status" target="_blank">/api/ai/status</a>
+            <a class="btn" href="/api/health" target="_blank">/api/health</a>
+        </div>
+        <div class="box">
+            <h2>📊 Thống kê nhanh</h2>
+            <p>Tổng phiên đã thu thập: <strong>${patternHistory.length}</strong> / ${MAX_HISTORY}</p>
+            <p>Dự đoán đúng: <strong>${predictions.filter(p=>p.Dung_hay_sai).length}</strong> / ${predictions.length}</p>
+            <p>Độ chính xác: <strong>${predictions.length ? (predictions.filter(p=>p.Dung_hay_sai).length/predictions.length*100).toFixed(2) : 0}%</strong></p>
         </div>
     </div>
     <script>
-        setInterval(()=>{
+        setInterval(() => {
             fetch('/api/ditmemaysun')
-                .then(r=>r.json())
-                .then(d=>{
-                    if(d.Tong){
-                        const el=document.querySelector('.live-data');
-                        el.textContent = d.Xuc_xac_1+'-'+d.Xuc_xac_2+'-'+d.Xuc_xac_3+' = '+d.Tong+' ('+d.Ket_qua+')';
-                        el.className = 'live-data '+(d.Ket_qua==='Tài'?'tai':'xiu');
+                .then(r => r.json())
+                .then(d => {
+                    if(d.Tong) {
+                        const el = document.querySelector('.live-data');
+                        el.textContent = d.Xuc_xac_1 + '-' + d.Xuc_xac_2 + '-' + d.Xuc_xac_3 + ' = ' + d.Tong + ' (' + d.Ket_qua + ')';
+                        el.className = 'live-data ' + (d.Ket_qua === 'Tài' ? 'tai' : 'xiu');
                     }
                 });
-        },5000);
+        }, 5000);
     </script>
 </body>
 </html>`);
@@ -490,12 +537,14 @@ function getLocalIP() {
     return '127.0.0.1';
 }
 
+// ==================== START SERVER ====================
 app.listen(PORT, '0.0.0.0', () => {
     console.log('=========================================');
     console.log('🚀 Sun.Win AI REST Super VIP Server');
     console.log('=========================================');
-    console.log(`📡 http://${getLocalIP()}:${PORT}`);
+    console.log(`📡 Địa chỉ: http://${getLocalIP()}:${PORT}`);
     console.log(`🔌 Nguồn dữ liệu: ${API_URL}`);
-    console.log('🧠 AI Ensemble: 10 Markov + Streak + Trend');
+    console.log(`⏱️  Tự động reload mỗi ${POLL_INTERVAL/1000}s`);
+    console.log('🧠 AI Ensemble: 10 Markov (1-10) + Streak + Trend + Adaptive Weights');
     console.log('=========================================');
 });
