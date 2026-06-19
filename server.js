@@ -1,645 +1,653 @@
 const WebSocket = require('ws');
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+const os = require('os');
 
 const app = express();
 app.use(cors());
-app.set('etag', false);
-app.use((req, res, next) => {
-    res.set('Cache-Control', 'no-store');
-    next();
-});
+const PORT = process.env.PORT || 3001;
 
-const PORT = 5000;
-const HISTORY_FILE = path.join(__dirname, 'history.json');
-const MAX_HISTORY = 10000;
-
-// ========== LOAD / SAVE HISTORY ==========
-let sessionHistory = [];
-try {
-    if (fs.existsSync(HISTORY_FILE)) {
-        sessionHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
-        console.log(`📂 Loaded ${sessionHistory.length} sessions from file`);
-    }
-} catch (e) {
-    console.error('History load error:', e.message);
-}
-
-function saveHistory() {
-    try {
-        fs.writeFileSync(HISTORY_FILE, JSON.stringify(sessionHistory.slice(-MAX_HISTORY)), 'utf8');
-    } catch (e) {
-        console.error('History save error:', e.message);
-    }
-}
-
-// ========== GLOBAL STATE ==========
+// ==================== DỮ LIỆU CHÍNH ====================
 let apiResponseData = {
-    id: "@tiendataox",
-    phien_hien_tai: null,
-    xuc_xac_1: null,
-    xuc_xac_2: null,
-    xuc_xac_3: null,
-    tong: null,
-    ket_qua: "",
-    lich_su_phien: sessionHistory
+    "Phien": null,
+    "Xuc_xac_1": null,
+    "Xuc_xac_2": null,
+    "Xuc_xac_3": null,
+    "Tong": null,
+    "Ket_qua": "",
+    "id": "@HuyDaiXuVN",
+    "server_time": new Date().toISOString()
 };
 
-let currentSessionId = null;
+let currentSessionId = null;                 // ID phiên hiện tại (đang chờ kết quả)
+const MAX_HISTORY = 100000;                 // Lưu tối đa 100.000 phiên
+const patternHistory = [];                  // Lịch sử chi tiết {session, dice, total, result, timestamp}
 
-// ===================== SUPER AI ENGINE (VIP) =====================
-class MasterAIPredictor {
+// ==================== AI ENSEMBLE SIÊU VIP ====================
+class EnsembleAI {
     constructor() {
-        this.history = sessionHistory; // reference
-        this.predictions = [];
-        this.failureMemory = []; // lưu đặc trưng thất bại
-        this.models = {
-            wormGPT:   { weight: 0.125, name: 'WormGPT',   color: '#00ff00', lr: 0.01 },
-            chatGPT:   { weight: 0.125, name: 'ChatGPT',   color: '#10a37f', lr: 0.01 },
-            gemini:    { weight: 0.125, name: 'Gemini',    color: '#4285f4', lr: 0.01 },
-            claude:    { weight: 0.125, name: 'Claude',    color: '#d97706', lr: 0.01 },
-            deepseek:  { weight: 0.125, name: 'DeepSeek',  color: '#8b5cf6', lr: 0.01 },
-            grok:      { weight: 0.125, name: 'Grok',      color: '#ec4899', lr: 0.01 },
-            copilot:   { weight: 0.125, name: 'Copilot',   color: '#06b6d4', lr: 0.01 },
-            llama:     { weight: 0.125, name: 'Llama',     color: '#f59e0b', lr: 0.01 }
-        };
-        this.accuracy = { correct: 0, total: 0 };
-        this.globalLearningRate = 0.01;
-        this.cachedPrediction = null;
+        this.ORDER_MAX = 10;                 // Markov bậc cao nhất
+        this.STREAK_THRESHOLD = 3;           // Ngưỡng phát hiện cầu
+        this.RECENT_WINDOW = 100;            // Số phiên gần nhất để đánh giá hiệu suất mô hình
+
+        // Markov Models: Map<bậc, Map<state, {T: count, X: count}>>
+        this.markovModels = new Map();
+        for (let i = 1; i <= this.ORDER_MAX; i++) {
+            this.markovModels.set(i, new Map());
+        }
+
+        // Lịch sử kết quả dạng mảng ['T','X'] – dùng cho huấn luyện
+        this.resultHistory = [];
+
+        // Lưu trữ các dự đoán gần đây của từng mô hình (để tính accuracy)
+        this.modelPredictions = new Map();   // bậc -> [{predict, actual, correct}]
+        for (let i = 1; i <= this.ORDER_MAX; i++) {
+            this.modelPredictions.set(i, []);
+        }
+
+        // Trọng số của từng mô hình (tổng = 1), cập nhật liên tục
+        this.weights = new Map();
+        this.initWeights();
+
+        // Phát hiện cầu
+        this.streakMode = null;             // 'bet_T', 'bet_X', 'one_one', 'two_one', null
+        this.streakWeight = 0.25;           // Trọng số của thành phần cầu trong tổng hợp
+
+        // Biến tạm lưu dự đoán từng mô hình trước khi có kết quả
+        this.pendingModelPreds = null;
     }
 
-    addData(session) {
-        // Kiểm tra dự đoán trước
-        if (this.predictions.length > 0) {
-            const last = this.predictions[this.predictions.length - 1];
-            if (last && !last.verified) {
-                last.actual = session.ket_qua;
-                last.correct = last.prediction === session.ket_qua;
-                last.verified = true;
+    initWeights() {
+        for (let i = 1; i <= this.ORDER_MAX; i++) {
+            this.weights.set(i, 1 / this.ORDER_MAX);
+        }
+    }
 
-                if (last.correct) {
-                    this.accuracy.correct++;
-                    // Thưởng model đúng
-                    Object.keys(this.models).forEach(m => {
-                        if (last.modelPredictions[m] === session.ket_qua) {
-                            this.models[m].weight += this.models[m].lr;
-                        }
-                    });
-                } else {
-                    // Phạt model sai, đặc biệt model nào dự đoán sai với confidence cao
-                    Object.keys(this.models).forEach(m => {
-                        if (last.modelPredictions[m] !== session.ket_qua) {
-                            const penalty = this.models[m].lr * (last.modelConfidences[m] / 100);
-                            this.models[m].weight = Math.max(0.02, this.models[m].weight - penalty);
-                        }
-                    });
-                    // Lưu đặc trưng thất bại
-                    this.failureMemory.push({
-                        features: this._extractFeatures(),
-                        wrongPrediction: last.prediction,
-                        actual: session.ket_qua
-                    });
-                    if (this.failureMemory.length > 100) this.failureMemory.shift();
+    // Cập nhật toàn bộ hệ thống khi có kết quả thực tế (actualResult: 'T' hoặc 'X')
+    update(actualResult) {
+        // 1. Thêm vào lịch sử kết quả (giới hạn 100k)
+        if (this.resultHistory.length >= MAX_HISTORY) {
+            this.resultHistory.shift();
+        }
+        this.resultHistory.push(actualResult);
+
+        // 2. Cập nhật tất cả mô hình Markov (bậc 1..ORDER_MAX)
+        for (let order = 1; order <= this.ORDER_MAX; order++) {
+            if (this.resultHistory.length > order) {
+                // State là chuỗi ORDER phần tử trước đó
+                const state = this.resultHistory.slice(-order - 1, -1).join('');
+                const next = actualResult;
+                const model = this.markovModels.get(order);
+                if (!model.has(state)) {
+                    model.set(state, { T: 0, X: 0 });
                 }
-                this.accuracy.total++;
-
-                // Chuẩn hóa trọng số
-                let totalW = Object.values(this.models).reduce((s, m) => s + m.weight, 0);
-                Object.values(this.models).forEach(m => m.weight /= totalW);
-
-                // Điều chỉnh learning rate dựa trên accuracy gần đây
-                if (this.accuracy.total % 20 === 0) {
-                    const recentAcc = this.accuracy.correct / this.accuracy.total;
-                    this.globalLearningRate = 0.01 * (recentAcc > 0.55 ? 1.5 : 0.5);
-                    Object.values(this.models).forEach(m => m.lr = this.globalLearningRate);
-                }
+                const counts = model.get(state);
+                counts[next]++;
+                model.set(state, counts);
             }
         }
 
-        // Tạo dự đoán mới
-        this.cachedPrediction = this._generatePrediction();
+        // 3. Đánh giá dự đoán trước đó (nếu có) và cập nhật điểm cho từng mô hình
+        this.evaluatePreviousPredictions(actualResult);
+
+        // 4. Cập nhật trọng số dựa trên độ chính xác gần đây
+        this.updateAdaptiveWeights();
+
+        // 5. Phát hiện cầu
+        this.detectStreak();
     }
 
+    // Dự đoán kết quả tiếp theo (trả về { prediction: 'Tài'|'Xỉu', confidence: % })
     predict() {
-        if (!this.cachedPrediction) this.cachedPrediction = this._generatePrediction();
-        return this.cachedPrediction;
-    }
+        // Lưu dự đoán của từng mô hình trước khi tổng hợp (để đánh giá sau)
+        this.saveIndividualPredictions();
 
-    _extractFeatures() {
-        if (this.history.length < 10) return [];
-        const last10 = this.history.slice(-10);
-        return [
-            last10.filter(p => p.ket_qua === 'Tài').length,
-            last10.reduce((s, p) => s + p.tong, 0) / 10,
-            last10.filter((v, i, a) => i > 0 && v.ket_qua !== a[i-1].ket_qua).length,
-            Math.abs(last10[last10.length-1].tong - 10.5)
-        ];
-    }
-
-    _generatePrediction() {
-        if (this.history.length < 5) {
-            return { du_doan: "Chưa đủ dữ liệu", do_tin_cay: 0, ly_do: ["Cần ≥5 phiên"], modelPredictions: {} };
+        // Nếu chưa đủ dữ liệu → ngẫu nhiên 50%
+        if (this.resultHistory.length < this.ORDER_MAX) {
+            const rand = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
+            return { prediction: rand, confidence: 50 };
         }
 
-        const modelResults = {};
-        const modelConfidences = {};
-        const votes = { 'Tài': 0, 'Xỉu': 0 };
-        const reasons = [];
+        // Tổng hợp phiếu bầu từ tất cả mô hình Markov
+        const votes = { T: 0, X: 0 };
+        for (let order = 1; order <= this.ORDER_MAX; order++) {
+            const pred = this.predictMarkov(order);
+            if (pred) {
+                const weight = this.weights.get(order) || 0;
+                votes[pred] += weight;
+            }
+        }
 
-        // ============ WORMGPT: Chaos + LSTM (giả lập) ============
-        const worm = this._wormGPT();
-        modelResults.wormGPT = worm.pred;
-        modelConfidences.wormGPT = worm.conf;
-        votes[worm.pred] += this.models.wormGPT.weight * worm.conf;
-        reasons.push({ model: 'WormGPT', pred: worm.pred, conf: worm.conf, reason: worm.reason });
+        // Thêm phiếu từ phát hiện cầu
+        const streakPred = this.predictStreak();
+        if (streakPred) {
+            votes[streakPred] += this.streakWeight;
+        }
 
-        // ============ CHATGPT: Hidden Markov Model (HMM) ============
-        const chat = this._chatGPT();
-        modelResults.chatGPT = chat.pred;
-        modelConfidences.chatGPT = chat.conf;
-        votes[chat.pred] += this.models.chatGPT.weight * chat.conf;
-        reasons.push({ model: 'ChatGPT', pred: chat.pred, conf: chat.conf, reason: chat.reason });
-
-        // ============ GEMINI: Transformer Attention ============
-        const gem = this._gemini();
-        modelResults.gemini = gem.pred;
-        modelConfidences.gemini = gem.conf;
-        votes[gem.pred] += this.models.gemini.weight * gem.conf;
-        reasons.push({ model: 'Gemini', pred: gem.pred, conf: gem.conf, reason: gem.reason });
-
-        // ============ CLAUDE: Bayesian + Causal Forest ============
-        const cl = this._claude();
-        modelResults.claude = cl.pred;
-        modelConfidences.claude = cl.conf;
-        votes[cl.pred] += this.models.claude.weight * cl.conf;
-        reasons.push({ model: 'Claude', pred: cl.pred, conf: cl.conf, reason: cl.reason });
-
-        // ============ DEEPSEEK: Fourier + Wavelet ============
-        const ds = this._deepseek();
-        modelResults.deepseek = ds.pred;
-        modelConfidences.deepseek = ds.conf;
-        votes[ds.pred] += this.models.deepseek.weight * ds.conf;
-        reasons.push({ model: 'DeepSeek', pred: ds.pred, conf: ds.conf, reason: ds.reason });
-
-        // ============ GROK: Fuzzy + Genetic Algorithm ============
-        const grok = this._grok();
-        modelResults.grok = grok.pred;
-        modelConfidences.grok = grok.conf;
-        votes[grok.pred] += this.models.grok.weight * grok.conf;
-        reasons.push({ model: 'Grok', pred: grok.pred, conf: grok.conf, reason: grok.reason });
-
-        // ============ COPILOT: Random Forest + Gradient Boosting ============
-        const cop = this._copilot();
-        modelResults.copilot = cop.pred;
-        modelConfidences.copilot = cop.conf;
-        votes[cop.pred] += this.models.copilot.weight * cop.conf;
-        reasons.push({ model: 'Copilot', pred: cop.pred, conf: cop.conf, reason: cop.reason });
-
-        // ============ LLAMA: Proximal Policy Optimization (PPO) ============
-        const llama = this._llama();
-        modelResults.llama = llama.pred;
-        modelConfidences.llama = llama.conf;
-        votes[llama.pred] += this.models.llama.weight * llama.conf;
-        reasons.push({ model: 'Llama', pred: llama.pred, conf: llama.conf, reason: llama.reason });
-
-        const final = votes['Tài'] > votes['Xỉu'] ? 'Tài' : 'Xỉu';
-        const totalVotes = votes['Tài'] + votes['Xỉu'];
-        const confidence = totalVotes > 0 ? Math.round((Math.abs(votes['Tài'] - votes['Xỉu']) / totalVotes) * 100 + 40) : 50;
-
-        const record = {
-            timestamp: Date.now(),
-            phien: this.history.length > 0 ? this.history[this.history.length - 1].phien : null,
-            prediction: final,
-            modelPredictions: modelResults,
-            modelConfidences: modelConfidences,
-            confidence: Math.min(98, confidence),
-            verified: false,
-            correct: null,
-            actual: null
-        };
-        this.predictions.push(record);
-        if (this.predictions.length > 2000) this.predictions.shift();
+        // Quyết định cuối cùng
+        let prediction;
+        let confidence;
+        const totalWeight = votes.T + votes.X;
+        if (totalWeight === 0) {
+            prediction = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
+            confidence = 50;
+        } else {
+            if (votes.T > votes.X) {
+                prediction = 'Tài';
+                confidence = (votes.T / totalWeight) * 100;
+            } else if (votes.X > votes.T) {
+                prediction = 'Xỉu';
+                confidence = (votes.X / totalWeight) * 100;
+            } else {
+                // Hoà → random nhưng vẫn tính confidence dựa trên cân bằng
+                prediction = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
+                confidence = 50;
+            }
+        }
 
         return {
-            du_doan: final,
-            do_tin_cay: record.confidence,
-            ly_do: reasons,
-            modelPredictions: modelResults,
-            accuracy: this.accuracy.total > 0 ? Math.round((this.accuracy.correct / this.accuracy.total) * 100) : 0
+            prediction,
+            confidence: Math.round(confidence * 100) / 100
         };
     }
 
-    // ========== CÁC MODEL NÂNG CẤP ==========
-    _wormGPT() {
-        const len = this.history.length;
-        if (len < 10) return { pred: 'Tài', conf: 50, reason: 'Thiếu dữ liệu' };
-        const last20 = this.history.slice(-20);
-        const changes = last20.filter((v, i) => i > 0 && v.ket_qua !== last20[i-1].ket_qua).length;
-        const chaos = changes / (last20.length - 1);
-        // LSTM đơn giản: dùng trung bình có trọng số mũ
-        let ema = 0;
-        last20.forEach(p => ema = ema * 0.8 + (p.tong > 10.5 ? 1 : 0) * 0.2);
-        const pred = ema > 0.5 ? 'Tài' : 'Xỉu';
-        const conf = 50 + chaos * 20 + Math.abs(ema - 0.5) * 30;
-        return { pred, conf: Math.min(88, conf), reason: `Chaos ${chaos.toFixed(2)}, EMA ${ema.toFixed(2)}` };
-    }
-
-    _chatGPT() {
-        if (this.history.length < 5) return { pred: 'Tài', conf: 50, reason: 'Thiếu dữ liệu' };
-        // HMM: trạng thái ẩn là "xu hướng" (Tài/Xỉu) với xác suất chuyển đổi
-        const trans = { 'Tài': { 'Tài': 0, 'Xỉu': 0 }, 'Xỉu': { 'Tài': 0, 'Xỉu': 0 } };
-        for (let i = 1; i < this.history.length; i++) {
-            trans[this.history[i-1].ket_qua][this.history[i].ket_qua]++;
-        }
-        const last = this.history[this.history.length-1].ket_qua;
-        const probs = trans[last];
-        const total = probs['Tài'] + probs['Xỉu'] || 1;
-        const pTai = probs['Tài'] / total;
-        // Emission probability dựa trên tổng điểm gần đây
-        const avgTotal = this.history.slice(-5).reduce((s,p) => s + p.tong, 0) / 5;
-        const likelihoodTai = avgTotal > 10.5 ? 0.7 : 0.3;
-        const posterior = (pTai * likelihoodTai) / (pTai * likelihoodTai + (1-pTai) * (1-likelihoodTai));
-        const pred = posterior > 0.5 ? 'Tài' : 'Xỉu';
-        const conf = 50 + Math.abs(posterior - 0.5) * 60;
-        return { pred, conf: Math.min(85, conf), reason: `HMM posterior ${posterior.toFixed(2)}` };
-    }
-
-    _gemini() {
-        if (this.history.length < 15) return { pred: 'Tài', conf: 50, reason: 'Cần ≥15 phiên' };
-        // Transformer Attention: tính attention score cho 15 phiên gần nhất dựa trên tổng điểm và kết quả
-        const seq = this.history.slice(-15);
-        const keys = seq.map(p => p.tong / 18);
-        const query = seq[seq.length-1].tong / 18;
-        // Scaled dot-product attention (đơn giản hóa)
-        const scores = keys.map(k => Math.exp(query * k));
-        const sumScores = scores.reduce((a,b) => a + b, 0);
-        const weights = scores.map(s => s / sumScores);
-        const weightedTai = weights.reduce((sum, w, i) => sum + (seq[i].ket_qua === 'Tài' ? w : 0), 0);
-        const pred = weightedTai > 0.5 ? 'Tài' : 'Xỉu';
-        const conf = 50 + Math.abs(weightedTai - 0.5) * 40;
-        return { pred, conf: Math.min(82, conf), reason: `Attention Tài=${weightedTai.toFixed(2)}` };
-    }
-
-    _claude() {
-        if (this.history.length < 20) return { pred: 'Tài', conf: 50, reason: 'Cần ≥20 phiên' };
-        // Bayesian + Causal Forest: tạo nhiều cây nhân quả
-        const trees = [
-            () => this.history.slice(-5).filter(p => p.tong > 10).length >= 3 ? 'Tài' : 'Xỉu',
-            () => this.history.slice(-10).filter(p => p.ket_qua === 'Tài').length >= 6 ? 'Tài' : 'Xỉu',
-            () => this.history.slice(-15).reduce((s,p) => s + p.tong, 0) / 15 > 10.5 ? 'Tài' : 'Xỉu',
-            () => this.history[this.history.length-1].tong > 10 ? 'Tài' : 'Xỉu',
-            () => {
-                const last10 = this.history.slice(-10);
-                const streak = last10.filter((v,i,a) => i>0 && v.ket_qua === a[i-1].ket_qua).length;
-                return streak > 5 ? (last10[last10.length-1].ket_qua === 'Tài' ? 'Xỉu' : 'Tài') : last10[last10.length-1].ket_qua;
-            }
-        ];
-        let votes = { 'Tài': 0, 'Xỉu': 0 };
-        trees.forEach(t => votes[t()]++);
-        const pred = votes['Tài'] > votes['Xỉu'] ? 'Tài' : 'Xỉu';
-        const conf = 50 + (Math.abs(votes['Tài'] - votes['Xỉu']) / 5) * 30;
-        return { pred, conf: Math.min(80, conf), reason: `Causal Forest vote: Tài ${votes['Tài']}, Xỉu ${votes['Xỉu']}` };
-    }
-
-    _deepseek() {
-        if (this.history.length < 25) return { pred: 'Tài', conf: 50, reason: 'Cần ≥25 phiên' };
-        // Wavelet: phân rã chuỗi thô thành các thành phần
-        const totals = this.history.slice(-32).map(p => p.tong);
-        // Haar wavelet đơn giản: tính trung bình và chi tiết
-        const avg = totals.reduce((a,b) => a + b, 0) / totals.length;
-        const detail = totals.slice(0, 16).reduce((a,b) => a + b, 0) - totals.slice(16, 32).reduce((a,b) => a + b, 0);
-        const trend = detail > 0 ? 'Tài' : 'Xỉu'; // nếu nửa đầu > nửa sau -> giảm -> Xỉu
-        const conf = 50 + Math.min(25, Math.abs(detail) / 20);
-        // Kết hợp với chu kỳ Fourier
-        const seq = this.history.slice(-20).map(p => p.ket_qua === 'Tài' ? 1 : -1);
-        let bestLag = 1, bestCorr = 0;
-        for (let lag = 2; lag <= 10; lag++) {
-            let corr = 0;
-            for (let i = 0; i < seq.length - lag; i++) corr += seq[i] * seq[i + lag];
-            if (Math.abs(corr) > Math.abs(bestCorr)) { bestCorr = corr; bestLag = lag; }
-        }
-        const fourierPred = seq[seq.length - bestLag] > 0 ? 'Tài' : 'Xỉu';
-        const combined = (trend === fourierPred) ? trend : (Math.random() > 0.5 ? trend : fourierPred);
-        return { pred: combined, conf: Math.min(85, 50 + Math.abs(bestCorr)/20*30 + Math.abs(detail)/20*20), reason: `Wavelet trend ${trend}, Fourier lag ${bestLag}` };
-    }
-
-    _grok() {
-        if (this.history.length < 12) return { pred: 'Tài', conf: 50, reason: 'Cần ≥12 phiên' };
-        // Genetic Algorithm: tạo quần thể các quy tắc, chọn lọc
-        const rules = [
-            () => this.history.slice(-4).filter(p => p.tong > 10).length >= 2 ? 'Tài' : 'Xỉu',
-            () => this.history.slice(-8).filter(p => p.ket_qua === 'Tài').length >= 5 ? 'Tài' : 'Xỉu',
-            () => this.history.slice(-3).reduce((s,p) => s + p.tong, 0) / 3 > 10.5 ? 'Tài' : 'Xỉu',
-            () => this.history[this.history.length-1].xuc_xac_1 > 3 ? 'Tài' : 'Xỉu'
-        ];
-        // Fitness: độ chính xác của rule trong 10 phiên gần nhất
-        const recent10 = this.history.slice(-10);
-        const fitness = rules.map(rule => {
-            let correct = 0;
-            for (let i = 1; i < recent10.length; i++) {
-                const pred = rule();
-                if (pred === recent10[i].ket_qua) correct++;
-            }
-            return correct / (recent10.length - 1);
-        });
-        const bestIdx = fitness.indexOf(Math.max(...fitness));
-        const pred = rules[bestIdx]();
-        const conf = 50 + fitness[bestIdx] * 30;
-        return { pred, conf: Math.min(82, conf), reason: `GA best rule fitness ${fitness[bestIdx].toFixed(2)}` };
-    }
-
-    _copilot() {
-        if (this.history.length < 15) return { pred: 'Tài', conf: 50, reason: 'Cần ≥15 phiên' };
-        // Gradient Boosting: ensemble of weak learners
-        const learners = [
-            () => this.history.slice(-5).filter(p => p.tong > 10).length >= 3 ? 'Tài' : 'Xỉu',
-            () => this.history.slice(-7).filter(p => p.ket_qua === 'Tài').length >= 4 ? 'Tài' : 'Xỉu',
-            () => this.history[this.history.length-1].tong > 10 ? 'Tài' : 'Xỉu',
-            () => this.history.slice(-10).reduce((s,p) => s + (p.ket_qua === 'Tài' ? 1 : 0), 0) > 5 ? 'Tài' : 'Xỉu'
-        ];
-        let votes = { 'Tài': 0, 'Xỉu': 0 };
-        // Boosting weights dựa trên error của từng learner trong quá khứ (đơn giản)
-        const learnerWeights = [0.3, 0.25, 0.25, 0.2];
-        learners.forEach((l, i) => {
-            const pred = l();
-            votes[pred] += learnerWeights[i];
-        });
-        const pred = votes['Tài'] > votes['Xỉu'] ? 'Tài' : 'Xỉu';
-        const conf = 50 + (Math.abs(votes['Tài'] - votes['Xỉu']) / 1) * 25;
-        return { pred, conf: Math.min(80, conf), reason: `Boosting votes: Tài ${votes['Tài'].toFixed(1)}, Xỉu ${votes['Xỉu'].toFixed(1)}` };
-    }
-
-    _llama() {
-        if (this.history.length < 10) return { pred: 'Tài', conf: 50, reason: 'Cần ≥10 phiên' };
-        // PPO: học chính sách dựa trên phần thưởng (reward = 1 nếu đúng, -1 nếu sai)
-        const recent = this.history.slice(-10);
-        let policyTai = 0.5; // xác suất chọn Tài
-        for (let i = 0; i < recent.length - 1; i++) {
-            const state = recent[i].ket_qua === 'Tài' ? 1 : 0;
-            const action = policyTai > 0.5 ? 'Tài' : 'Xỉu';
-            const reward = action === recent[i+1].ket_qua ? 1 : -1;
-            // Cập nhật policy (gradient ascent đơn giản)
-            policyTai += 0.05 * reward * (state === 1 ? 1 : -1);
-            policyTai = Math.min(0.9, Math.max(0.1, policyTai));
-        }
-        const pred = policyTai > 0.5 ? 'Tài' : 'Xỉu';
-        const conf = 50 + Math.abs(policyTai - 0.5) * 50;
-        return { pred, conf: Math.min(85, conf), reason: `PPO policy Tài=${policyTai.toFixed(2)}` };
-    }
-
-    getStats() {
-        const verified = this.predictions.filter(p => p.verified);
-        const correct = verified.filter(p => p.correct);
-        const modelStats = {};
-        Object.keys(this.models).forEach(m => {
-            const relevant = verified.filter(p => p.modelPredictions[m]);
-            const modelCorrect = relevant.filter(p => p.modelPredictions[m] === p.actual);
-            modelStats[m] = {
-                name: this.models[m].name,
-                color: this.models[m].color,
-                weight: this.models[m].weight,
-                accuracy: relevant.length > 0 ? Math.round((modelCorrect.length / relevant.length) * 100) : 0,
-                correct: modelCorrect.length,
-                total: relevant.length
-            };
-        });
-        return {
-            totalPredictions: this.predictions.length,
-            verifiedPredictions: verified.length,
-            correctPredictions: correct.length,
-            overallAccuracy: verified.length > 0 ? Math.round((correct.length / verified.length) * 100) : 0,
-            modelStats,
-            recentPredictions: this.predictions.slice(-30).reverse(),
-            accuracyHistory: this._getAccuracyHistory()
-        };
-    }
-
-    _getAccuracyHistory() {
-        const verified = this.predictions.filter(p => p.verified);
-        const history = [];
-        for (let i = 0; i < verified.length; i++) {
-            if (i % 5 === 0) {
-                const segment = verified.slice(0, i + 1);
-                const corr = segment.filter(p => p.correct).length;
-                history.push({ x: i + 1, y: Math.round((corr / segment.length) * 100) });
+    // Dự đoán từ Markov bậc `order` (có back-off)
+    predictMarkov(order) {
+        if (this.resultHistory.length < order) return null;
+        let state = this.resultHistory.slice(-order).join('');
+        const model = this.markovModels.get(order);
+        // Back-off: thử bậc nhỏ hơn nếu không tìm thấy state
+        for (let len = order; len >= 1; len--) {
+            const subState = this.resultHistory.slice(-len).join('');
+            if (model.has(subState)) {
+                const counts = model.get(subState);
+                if (counts.T + counts.X === 0) return null;
+                if (counts.T > counts.X) return 'T';
+                if (counts.X > counts.T) return 'X';
+                return null; // hoà → không dự đoán
             }
         }
-        return history;
+        return null;
+    }
+
+    // Phát hiện mẫu cầu và trả về dự đoán theo cầu (hoặc null)
+    detectStreak() {
+        const len = this.resultHistory.length;
+        if (len < this.STREAK_THRESHOLD) {
+            this.streakMode = null;
+            return;
+        }
+        const last3 = this.resultHistory.slice(-3).join('');
+        if (last3 === 'TTT') {
+            this.streakMode = 'bet_T';
+        } else if (last3 === 'XXX') {
+            this.streakMode = 'bet_X';
+        } else if (len >= 4 && this.resultHistory.slice(-4).join('') === 'TXTX') {
+            this.streakMode = 'one_one';
+        } else if (len >= 5) {
+            const last5 = this.resultHistory.slice(-5).join('');
+            if (last5 === 'TTXTT' || last5 === 'XXTXX') {
+                this.streakMode = 'two_one';
+            } else {
+                this.streakMode = null;
+            }
+        } else {
+            this.streakMode = null;
+        }
+    }
+
+    predictStreak() {
+        if (!this.streakMode) return null;
+        const last = this.resultHistory[this.resultHistory.length - 1];
+        switch (this.streakMode) {
+            case 'bet_T': return 'T';
+            case 'bet_X': return 'X';
+            case 'one_one': return last === 'T' ? 'X' : 'T';
+            case 'two_one': 
+                // Mẫu 2-1: nếu vừa có X sau 2 T, khả năng cao quay lại T; và ngược lại
+                // Đơn giản hoá: nếu chuỗi kết thúc bằng T thì dự đoán X (theo nhịp 2T-1X-2T...)
+                // Ta lấy phần tử cuối: nếu last === 'T' dự đoán 'X', ngược lại 'T'
+                return last === 'T' ? 'X' : 'T';
+            default: return null;
+        }
+    }
+
+    // Lưu dự đoán riêng của từng mô hình (sẽ được đánh giá khi có kết quả thực tế)
+    saveIndividualPredictions() {
+        this.pendingModelPreds = new Map();
+        for (let order = 1; order <= this.ORDER_MAX; order++) {
+            const pred = this.predictMarkov(order);
+            if (pred) {
+                this.pendingModelPreds.set(order, pred);
+            }
+        }
+    }
+
+    // Sau khi có kết quả, đánh giá các dự đoán đã lưu
+    evaluatePreviousPredictions(actualResult) {
+        if (!this.pendingModelPreds) return;
+        for (let order = 1; order <= this.ORDER_MAX; order++) {
+            if (this.pendingModelPreds.has(order)) {
+                const pred = this.pendingModelPreds.get(order);
+                const correct = (pred === actualResult);
+                const scores = this.modelPredictions.get(order);
+                scores.push({ predict: pred, actual: actualResult, correct });
+                if (scores.length > this.RECENT_WINDOW) {
+                    scores.shift();
+                }
+            }
+        }
+        this.pendingModelPreds = null; // đã xử lý xong
+    }
+
+    // Cập nhật trọng số dựa trên độ chính xác gần đây (cửa sổ RECENT_WINDOW phiên)
+    updateAdaptiveWeights() {
+        const accuracies = new Map();
+        let totalAcc = 0;
+        for (let order = 1; order <= this.ORDER_MAX; order++) {
+            const scores = this.modelPredictions.get(order);
+            if (scores.length === 0) {
+                accuracies.set(order, 0);
+            } else {
+                const correct = scores.filter(s => s.correct).length;
+                const acc = correct / scores.length;
+                accuracies.set(order, acc);
+                totalAcc += acc;
+            }
+        }
+        if (totalAcc === 0) {
+            this.initWeights();
+        } else {
+            for (let order = 1; order <= this.ORDER_MAX; order++) {
+                const w = accuracies.get(order) / totalAcc;
+                this.weights.set(order, w);
+            }
+        }
     }
 }
 
-const ai = new MasterAIPredictor();
+// Khởi tạo AI toàn cục
+const ai = new EnsembleAI();
 
-// ========== WEBSOCKET (giữ nguyên như bản trước) ==========
-const WS_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0";
+// ==================== QUẢN LÝ DỰ ĐOÁN ====================
+let pendingPrediction = null;              // Dự đoán cho phiên hiện tại (chưa có kết quả)
+const predictions = [];                    // Lịch sử các dự đoán đã kiểm chứng
+
+// ==================== WEBSOCKET ====================
+const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0";
 const WS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Origin": "https://play.sun.win"
 };
+const RECONNECT_DELAY = 2500;
+const PING_INTERVAL = 15000;
+
+const initialMessages = [
+    [
+        1, "MiniGame", "GM_apivopnhaan", "WangLin",
+        {
+            "info": "{\"ipAddress\":\"113.185.45.88\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJwbGFtYW1hIiwiYm90IjowLCJpc01lcmNoYW50IjpmYWxzZSwidmVyaWZpZWRCYW5rQWNjb3VudCI6ZmFsc2UsInBsYXlFdmVudExvYmJ5IjpmYWxzZSwiY3VzdG9tZXJJZCI6MzMxNDgxMTYyLCJhZmZJZCI6IkdFTVdJTiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoiZ2VtIiwidGltZXN0YW1wIjoxNzY2NDc0NzgwMDA2LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6ZmFsc2UsImlwQWRkcmVzcyI6IjExMy4xODUuNDUuODgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzE4LnBuZyIsInBsYXRmb3JtSWQiOjUsInVzZXJJZCI6IjZhOGI0ZDM4LTFlYzEtNDUxYi1hYTA1LWYyZDkwYWFhNGM1MCIsInJlZ1RpbWUiOjE3NjY0NzQ3NTEzOTEsInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fYXBpdm9wbmhhYW4ifQ.YFOscbeojWNlRo7490BtlzkDGYmwVpnlgOoh04oCJy4\",\"locale\":\"vi\",\"userId\":\"6a8b4d38-1ec1-451b-aa05-f2d90aaa4c50\",\"username\":\"GM_apivopnhaan\",\"timestamp\":1766474780007,\"refreshToken\":\"63d5c9be0c494b74b53ba150d69039fd.7592f06d63974473b4aaa1ea849b2940\"}",
+            "signature": "66772A1641AA8B18BD99207CE448EA00ECA6D8A4D457C1FF13AB092C22C8DECF0C0014971639A0FBA9984701A91FCCBE3056ABC1BE1541D1C198AA18AF3C45595AF6601F8B048947ADF8F48A9E3E074162F9BA3E6C0F7543D38BD54FD4C0A2C56D19716CC5353BBC73D12C3A92F78C833F4EFFDC4AB99E55C77AD2CDFA91E296"
+        }
+    ],
+    [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }],
+    [6, "MiniGame", "lobbyPlugin", { cmd: 10001 }]
+];
 
 let ws = null;
 let pingInterval = null;
-let reconnectAttempts = 0;
+let reconnectTimeout = null;
 
-function connectWS() {
-    if (ws) { ws.removeAllListeners(); ws.close(); }
-    ws = new WebSocket(WS_URL, { headers: WS_HEADERS });
-    ws.on('open', () => {
-        console.log('✅ WebSocket connected');
-        reconnectAttempts = 0;
-        const initMsgs = [
-            [1, "MiniGame", "GM_fbbdbebndbbc", "123123p", {
-                "info": "{\"ipAddress\":\"2402:800:62cd:cb7c:1a7:7a52:9c3e:c290\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJuZG5lYmViYnMiLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMTIxMDczMTUsImFmZklkIjoiR0VNV0lOIiwiYmFubmVkIjpmYWxzZSwiYnJhbmQiOiJnZW0iLCJ0aW1lc3RhbXAiOjE3NTQ5MjYxMDI1MjcsImxvY2tHYW1lcyI6W10sImFtb3VudCI6MCwibG9ja0NoYXQiOmZhbHNlLCJwaG9uZVZlcmlmaWVkIjpmYWxzZSwiaXBBZGRyZXNzIjoiMjQwMjo4MDA6NjJjZDpjYjdjOjFhNzo3YTUyOjljM2U6YzI5MCIsIm11dGUiOmZhbHNlLCJhdmF0YXIiOiJodHRwczovL2ltYWdlcy5zd2luc2hvcC5uZXQvaW1hZ2VzL2F2YXRhci9hdmF0YXJfMDEucG5nIiwicGxhdGZvcm1JZCI6NSwidXNlcklkIjoiN2RhNDlhNDQtMjlhYS00ZmRiLWJkNGMtNjU5OTQ5YzU3NDdkIiwicmVnVGltZSI6MTc1NDkyNjAyMjUxNSwicGhvbmUiOiIiLCJkZXBvc2l0IjpmYWxzZSwidXNlcm5hbWUiOiJHTV9mYmJkYmVibmRiYmMifQ.DAyEeoAnz8we-Qd0xS0tnqOZ8idkUJkxksBjr_Gei8A\",\"locale\":\"vi\",\"userId\":\"7da49a44-29aa-4fdb-bd4c-659949c5747d\",\"username\":\"GM_fbbdbebndbbc\",\"timestamp\":1754926102527,\"refreshToken\":\"7cc4ad191f4348849f69427a366ea0fd.a68ece9aa85842c7ba523170d0a4ae3e\"}",
-                "signature": "53D9E12F910044B140A2EC659167512E2329502FE84A6744F1CD5CBA9B6EC04915673F2CBAE043C4EDB94DDF88F3D3E839A931100845B8F179106E1F44ECBB4253EC536610CCBD0CE90BD8495DAC3E8A9DBDB46FE49B51E88569A6F117F8336AC7ADC226B4F213ECE2F8E0996F2DD5515476C8275F0B2406CDF2987F38A6DA24"
-            }],
-            [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }],
-            [6, "MiniGame", "lobbyPlugin", { cmd: 10001 }]
-        ];
-        initMsgs.forEach((msg, i) => {
-            setTimeout(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }, i * 600);
-        });
-        clearInterval(pingInterval);
-        pingInterval = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.ping(); }, 15000);
-    });
-    ws.on('pong', () => console.log('📶 Pong'));
-    ws.on('message', (raw) => {
-        try {
-            const data = JSON.parse(raw);
-            if (!Array.isArray(data) || typeof data[1] !== 'object') return;
-            const { cmd, sid, d1, d2, d3, gBB } = data[1];
-            if (cmd === 1008 && sid) currentSessionId = sid;
-            if (cmd === 1003 && gBB && d1 && d2 && d3) {
-                const sessionId = sid || currentSessionId;
-                if (!sessionId) return;
-                const total = d1 + d2 + d3;
-                const result = total > 10 ? 'Tài' : 'Xỉu';
-                const session = { phien: sessionId, xuc_xac_1: d1, xuc_xac_2: d2, xuc_xac_3: d3, tong: total, ket_qua: result };
-                if (sessionHistory.length === 0 || sessionHistory[sessionHistory.length-1].phien !== sessionId) {
-                    sessionHistory.push(session);
-                    if (sessionHistory.length > MAX_HISTORY) sessionHistory.shift();
-                    saveHistory();
-                    ai.addData(session);
-                }
-                apiResponseData = { ...apiResponseData, phien_hien_tai: sessionId, xuc_xac_1: d1, xuc_xac_2: d2, xuc_xac_3: d3, tong: total, ket_qua: result, lich_su_phien: sessionHistory };
-                console.log(`🎲 Phiên ${sessionId}: ${d1}-${d2}-${d3} = ${total} (${result}) | History: ${sessionHistory.length}`);
-                currentSessionId = null;
+function getLocalIP() {
+    const interfaces = os.networkInterfaces();
+    for (const name in interfaces) {
+        for (const iface of interfaces[name]) {
+            if (!iface.internal && iface.family === 'IPv4') {
+                return iface.address;
             }
-        } catch (e) { console.error('Message error:', e.message); }
-    });
-    ws.on('close', (code, reason) => {
-        console.log(`🔌 Closed (${code}): ${reason}`);
-        clearInterval(pingInterval);
-        const delay = Math.min(30000, 2000 * Math.pow(2, reconnectAttempts));
-        reconnectAttempts++;
-        setTimeout(connectWS, delay);
-    });
-    ws.on('error', (err) => { console.error('WebSocket error:', err.message); ws.close(); });
+        }
+    }
+    return '127.0.0.1';
 }
 
-// ========== ROUTES ==========
-app.get('/sunlon', (req, res) => res.json({ ...apiResponseData, lich_su_phien: sessionHistory }));
+function connectWebSocket() {
+    if (ws) {
+        ws.removeAllListeners();
+        ws.close();
+    }
 
-app.get('/predict', (req, res) => {
-    const pred = ai.predict();
+    ws = new WebSocket(WEBSOCKET_URL, { headers: WS_HEADERS });
+
+    ws.on('open', () => {
+        console.log('[✅] WebSocket connected to Sun.Win');
+        initialMessages.forEach((msg, i) => {
+            setTimeout(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(msg));
+                }
+            }, i * 600);
+        });
+
+        clearInterval(pingInterval);
+        pingInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.ping();
+            }
+        }, PING_INTERVAL);
+    });
+
+    ws.on('pong', () => {
+        console.log('[📶] Ping OK');
+    });
+
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            if (!Array.isArray(data) || typeof data[1] !== 'object') return;
+
+            const { cmd, sid, d1, d2, d3, gBB } = data[1];
+
+            // --- PHIÊN MỚI ---
+            if (cmd === 1008 && sid) {
+                currentSessionId = parseInt(sid) || sid;
+                console.log(`[🎮] Phiên mới: ${currentSessionId}`);
+
+                // Tạo dự đoán cho chính phiên này (sẽ kiểm tra khi có kết quả)
+                if (patternHistory.length > 0) {
+                    // Lưu dự đoán riêng của từng model trước khi tổng hợp (để sau này đánh giá)
+                    ai.saveIndividualPredictions();
+                    const { prediction, confidence } = ai.predict();
+                    pendingPrediction = {
+                        Phien_du_doan: currentSessionId,
+                        Du_doan: prediction,
+                        Do_tin_cay: confidence,
+                        Thoi_gian_du_doan: new Date().toISOString(),
+                        Ket_qua_thuc_te: null,
+                        Dung_hay_sai: null
+                    };
+                } else {
+                    // Chưa có lịch sử, dự đoán ngẫu nhiên
+                    const randPred = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
+                    pendingPrediction = {
+                        Phien_du_doan: currentSessionId,
+                        Du_doan: randPred,
+                        Do_tin_cay: 50,
+                        Thoi_gian_du_doan: new Date().toISOString(),
+                        Ket_qua_thuc_te: null,
+                        Dung_hay_sai: null
+                    };
+                }
+            }
+
+            // --- KẾT QUẢ ---
+            if (cmd === 1003 && gBB) {
+                if (!d1 || !d2 || !d3) return;
+
+                const total = d1 + d2 + d3;
+                const result = (total > 10) ? "Tài" : "Xỉu";
+                const sessionId = currentSessionId;
+
+                // Cập nhật dữ liệu API
+                apiResponseData = {
+                    "Phien": sessionId,
+                    "Xuc_xac_1": d1,
+                    "Xuc_xac_2": d2,
+                    "Xuc_xac_3": d3,
+                    "Tong": total,
+                    "Ket_qua": result,
+                    "id": "@cskh_huydaixu",
+                    "server_time": new Date().toISOString(),
+                    "update_count": (apiResponseData.update_count || 0) + 1
+                };
+
+                console.log(`[🎲] Phiên ${sessionId}: ${d1}-${d2}-${d3} = ${total} (${result})`);
+
+                // Lưu vào lịch sử chi tiết (giới hạn 100k)
+                patternHistory.push({
+                    session: sessionId,
+                    dice: [d1, d2, d3],
+                    total: total,
+                    result: result,
+                    timestamp: new Date().toISOString()
+                });
+                if (patternHistory.length > MAX_HISTORY) {
+                    patternHistory.shift();
+                }
+
+                // Cập nhật AI với kết quả thực tế
+                ai.update(result === 'Tài' ? 'T' : 'X');
+
+                // Kiểm tra pending prediction
+                if (pendingPrediction && pendingPrediction.Phien_du_doan === sessionId) {
+                    pendingPrediction.Ket_qua_thuc_te = result;
+                    pendingPrediction.Dung_hay_sai = (pendingPrediction.Du_doan === result);
+                    predictions.push({ ...pendingPrediction });
+                    pendingPrediction = null; // Đã giải quyết
+                }
+
+                // Reset phiên hiện tại
+                currentSessionId = null;
+            }
+        } catch (e) {
+            console.error('[❌] Lỗi xử lý message:', e.message);
+        }
+    });
+
+    ws.on('close', (code, reason) => {
+        console.log(`[🔌] WebSocket closed. Code: ${code}, Reason: ${reason.toString()}`);
+        clearInterval(pingInterval);
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = setTimeout(connectWebSocket, RECONNECT_DELAY);
+    });
+
+    ws.on('error', (err) => {
+        console.error('[❌] WebSocket error:', err.message);
+        ws.close();
+    });
+}
+
+// ==================== ROUTES API ====================
+
+app.get('/api/ditmemaysun', (req, res) => {
+    res.json(apiResponseData);
+});
+
+// Lịch sử (hỗ trợ limit, all)
+app.get('/api/history', (req, res) => {
+    const limit = parseInt(req.query.limit) || 100;
+    const all = req.query.all === 'true';
+    const historySlice = all ? patternHistory : patternHistory.slice(-limit);
     res.json({
-        phien: apiResponseData.phien_hien_tai,
-        xuc_xac_1: apiResponseData.xuc_xac_1,
-        xuc_xac_2: apiResponseData.xuc_xac_2,
-        xuc_xac_3: apiResponseData.xuc_xac_3,
-        tong: apiResponseData.tong,
-        ket_qua: apiResponseData.ket_qua,
-        phien_hien_tai: apiResponseData.phien_hien_tai ? parseInt(apiResponseData.phien_hien_tai) + 1 : null,
-        du_doan: pred.du_doan,
-        do_tin_cay: pred.do_tin_cay,
-        ly_do: pred.ly_do,
-        model_predictions: pred.modelPredictions,
-        accuracy: pred.accuracy
+        current: apiResponseData,
+        history: historySlice,
+        total: patternHistory.length,
+        max_storage: MAX_HISTORY
     });
 });
 
-app.get('/stats', (req, res) => {
-    const stats = ai.getStats();
-    const html = `<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🧠 Super AI Stats VIP</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { background: linear-gradient(135deg, #0d0d2b 0%, #1a1a3e 100%); font-family: 'Segoe UI', system-ui; color: #fff; padding: 20px; }
-        .header { text-align: center; margin-bottom: 30px; }
-        .header h1 { font-size: 3em; background: linear-gradient(45deg, #00ff00, #10a37f, #4285f4, #d97706, #8b5cf6, #ec4899, #06b6d4, #f59e0b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .live { background: #f00; padding: 5px 15px; border-radius: 20px; display: inline-block; animation: pulse 1.5s infinite; }
-        @keyframes pulse { 0%{opacity:1;} 50%{opacity:0.5;} 100%{opacity:1;} }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 20px 0; }
-        .card { background: rgba(255,255,255,0.08); backdrop-filter: blur(12px); border-radius: 20px; padding: 20px; border: 1px solid rgba(255,255,255,0.15); transition: 0.3s; }
-        .card:hover { transform: translateY(-5px); box-shadow: 0 15px 30px rgba(0,0,0,0.4); }
-        .model-card { border-left: 5px solid; }
-        .progress { background: rgba(255,255,255,0.1); border-radius: 10px; height: 18px; margin: 10px 0; }
-        .progress-fill { height: 100%; border-radius: 10px; width: 0%; transition: width 1.5s; }
-        table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.06); backdrop-filter: blur(10px); border-radius: 15px; overflow: hidden; margin-top: 20px; }
-        th { background: rgba(255,255,255,0.1); padding: 12px; text-align: left; }
-        td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-        .correct { color: #0f0; font-weight: bold; } .wrong { color: #f44; font-weight: bold; }
-        .model-tag { display: inline-block; padding: 2px 8px; border-radius: 5px; font-size: 0.75em; margin: 2px; background: rgba(255,255,255,0.1); }
-        .chart-container { background: rgba(255,255,255,0.08); backdrop-filter: blur(12px); border-radius: 20px; padding: 20px; margin: 20px 0; }
-        canvas { width: 100% !important; height: auto !important; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>🧠 Super AI Tài Xỉu – 8 Model VIP</h1>
-        <p><span class="live">● LIVE</span> &nbsp; WormGPT · ChatGPT · Gemini · Claude · DeepSeek · Grok · Copilot · Llama</p>
-    </div>
-    <div class="grid">
-        <div class="card">
-            <h3>📊 Tổng quan</h3>
-            <h2>${stats.overallAccuracy}%</h2>
-            <p>Độ chính xác (${stats.correctPredictions}/${stats.verifiedPredictions})</p>
+// Lịch sử SunWin (format riêng)
+app.get('/api/sunwin/history', (req, res) => {
+    const limit = parseInt(req.query.limit) || 100;
+    const all = req.query.all === 'true';
+    const lastItems = all ? patternHistory : patternHistory.slice(-limit);
+    const formatted = lastItems.map(item => ({
+        "Ket_qua": item.result,
+        "Phien": item.session,
+        "Tong": item.total,
+        "Xuc_xac_1": item.dice[0],
+        "Xuc_xac_2": item.dice[1],
+        "Xuc_xac_3": item.dice[2],
+        "id": "@cskh_huydaixu"
+    }));
+    res.json(formatted);
+});
+
+// Dự đoán siêu VIP (dành cho phiên tiếp theo)
+app.get('/api/sunwin/dudoan', (req, res) => {
+    if (patternHistory.length === 0) {
+        return res.json({ message: "Chưa có dữ liệu lịch sử để dự đoán." });
+    }
+
+    const latestSession = patternHistory[patternHistory.length - 1];
+    const nextSession = latestSession.session + 1;
+
+    // Dự đoán từ AI (không ảnh hưởng đến pendingPrediction của hệ thống)
+    ai.saveIndividualPredictions();  // Lưu để đánh giá nếu cần (có thể bỏ qua vì không có kết quả ngay)
+    const { prediction, confidence } = ai.predict();
+
+    res.json({
+        "Ket_qua": latestSession.result,
+        "Phien": latestSession.session,
+        "Xuc_xac_1": latestSession.dice[0],
+        "Xuc_xac_2": latestSession.dice[1],
+        "Xuc_xac_3": latestSession.dice[2],
+        "Tong": latestSession.total,
+        "Phien_hien_tai": nextSession,
+        "Du_doan": prediction,
+        "Do_tin_cay": confidence
+    });
+});
+
+// Kiểm tra lịch sử dự đoán & thống kê đúng/sai
+app.get('/api/check', (req, res) => {
+    const total = predictions.length;
+    const correct = predictions.filter(p => p.Dung_hay_sai === true).length;
+    const accuracy = total > 0 ? ((correct / total) * 100).toFixed(2) : 0;
+
+    res.json({
+        predictions_history: predictions.map(p => ({
+            Phien_du_doan: p.Phien_du_doan,
+            Du_doan: p.Du_doan,
+            Do_tin_cay: p.Do_tin_cay,
+            Thoi_gian_du_doan: p.Thoi_gian_du_doan,
+            Ket_qua_thuc_te: p.Ket_qua_thuc_te,
+            Dung_hay_sai: p.Dung_hay_sai
+        })),
+        stats: {
+            total_predictions: total,
+            correct: correct,
+            incorrect: total - correct,
+            accuracy_percent: parseFloat(accuracy)
+        },
+        current_pending_prediction: pendingPrediction ? {
+            Phien_du_doan: pendingPrediction.Phien_du_doan,
+            Du_doan: pendingPrediction.Du_doan,
+            Do_tin_cay: pendingPrediction.Do_tin_cay
+        } : null
+    });
+});
+
+// Thống kê Tài/Xỉu
+app.get('/api/stats', (req, res) => {
+    const taiCount = patternHistory.filter(item => item.result === "Tài").length;
+    const xiuCount = patternHistory.filter(item => item.result === "Xỉu").length;
+    const totalSessions = patternHistory.length;
+    res.json({
+        total_sessions: totalSessions,
+        tai_count: taiCount,
+        xiu_count: xiuCount,
+        tai_percentage: totalSessions > 0 ? ((taiCount / totalSessions) * 100).toFixed(2) : 0,
+        xiu_percentage: totalSessions > 0 ? ((xiuCount / totalSessions) * 100).toFixed(2) : 0,
+        last_update: apiResponseData.server_time,
+        server_uptime: process.uptime().toFixed(0) + 's'
+    });
+});
+
+// Health check (thêm thông tin AI)
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'online',
+        websocket: ws ? ws.readyState === WebSocket.OPEN : false,
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        history_count: patternHistory.length,
+        ai_markov_states: Array.from(ai.markovModels.entries()).reduce((sum, entry) => sum + entry[1].size, 0),
+        ai_streak_mode: ai.streakMode,
+        predictions_made: predictions.length
+    });
+});
+
+// Giao diện chính
+app.get('/', (req, res) => {
+    const localIP = getLocalIP();
+    const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Sun.Win AI VIP - Worm GPT</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #0a0a0a; color: #00ff00; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .header { text-align: center; padding: 20px; background: #111; border-radius: 10px; margin-bottom: 20px; }
+            .data-box { background: #111; padding: 20px; border-radius: 10px; margin: 10px 0; }
+            .live-data { font-size: 2em; font-weight: bold; }
+            .tai { color: #00ff00; } .xiu { color: #ff0000; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+            a { color: #00ffff; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔴 Sun.Win Live Data - AI Ensemble VIP</h1>
+                <p>Worm GPT Edition | Multi‑Markov + Streak | 100k phiên</p>
+                <p>Server: ${localIP}:${PORT}</p>
+            </div>
+            <div class="grid">
+                <div class="data-box">
+                    <h2>🎲 Kết quả mới nhất</h2>
+                    <div class="live-data ${apiResponseData.Ket_qua === 'Tài' ? 'tai' : 'xiu'}">
+                        ${apiResponseData.Tong ? `${apiResponseData.Xuc_xac_1}-${apiResponseData.Xuc_xac_2}-${apiResponseData.Xuc_xac_3} = ${apiResponseData.Tong} (${apiResponseData.Ket_qua})` : 'Đang chờ...'}
+                    </div>
+                    <p>Phiên: ${apiResponseData.Phien || 'N/A'}</p>
+                    <p>Time: ${apiResponseData.server_time || 'N/A'}</p>
+                </div>
+                <div class="data-box">
+                    <h2>📡 API VIP</h2>
+                    <ul>
+                        <li><a href="/api/ditmemaysun">/api/ditmemaysun</a> - JSON mới nhất</li>
+                        <li><a href="/api/sunwin/history?limit=20">/api/sunwin/history</a> - Lịch sử (tối đa 100k)</li>
+                        <li><a href="/api/sunwin/dudoan">/api/sunwin/dudoan</a> - Dự đoán phiên kế tiếp</li>
+                        <li><a href="/api/check">/api/check</a> - Kiểm tra dự đoán & thống kê</li>
+                        <li><a href="/api/stats">/api/stats</a> - Thống kê Tài/Xỉu</li>
+                        <li><a href="/api/health">/api/health</a> - Trạng thái server + AI</li>
+                    </ul>
+                </div>
+            </div>
         </div>
-        <div class="card">
-            <h3>🧪 Dự đoán</h3>
-            <h2>${stats.totalPredictions}</h2>
-            <p>Tổng số dự đoán</p>
-        </div>
-        <div class="card">
-            <h3>🤖 Models</h3>
-            <h2>8</h2>
-            <p>Ensemble Learning</p>
-        </div>
-    </div>
-    <h2 style="margin:20px 0">🏆 Hiệu suất từng Model</h2>
-    <div class="grid">
-        ${Object.values(stats.modelStats).map(m => `
-        <div class="card model-card" style="border-left-color: ${m.color}">
-            <h3 style="color:${m.color}">${m.name}</h3>
-            <h2>${m.accuracy}%</h2>
-            <div class="progress"><div class="progress-fill" style="width:${m.accuracy}%; background:${m.color}"></div></div>
-            <p>✅ ${m.correct}/${m.total} &nbsp; | &nbsp; ⚖️ ${Math.round(m.weight*100)}%</p>
-        </div>`).join('')}
-    </div>
-    <div class="chart-container">
-        <h3>📈 Độ chính xác theo thời gian</h3>
-        <canvas id="accuracyChart"></canvas>
-    </div>
-    <h2 style="margin:20px 0">📋 Lịch sử dự đoán gần đây</h2>
-    <div style="overflow-x:auto;">
-        <table>
-            <tr><th>Thời gian</th><th>Phiên</th><th>Dự đoán</th><th>Kết quả</th><th>Độ tin cậy</th><th>Models</th></tr>
-            ${stats.recentPredictions.map(p => `
-            <tr>
-                <td>${new Date(p.timestamp).toLocaleTimeString('vi-VN')}</td>
-                <td>${p.phien||''}</td>
-                <td style="color:${p.prediction==='Tài'?'#0f0':'#f44'}">${p.prediction}</td>
-                <td>${p.verified ? (p.correct ? '<span class="correct">✅ Đúng</span>' : '<span class="wrong">❌ Sai</span>') + ` (${p.actual})` : '⏳ Chờ'}</td>
-                <td>${p.confidence}%</td>
-                <td>${Object.entries(p.modelPredictions).map(([k,v]) => `<span class="model-tag" style="border:1px solid ${ai.models[k].color}">${ai.models[k].name}: ${v}</span>`).join(' ')}</td>
-            </tr>`).join('')}
-        </table>
-    </div>
-    <p style="text-align:center; margin-top:20px;">🔄 Tự refresh sau 10s | <span id="timer">10</span>s</p>
-    <script>
-        let t = 10;
-        setInterval(() => { t--; document.getElementById('timer').textContent = t; if(t<=0) location.reload(); }, 1000);
-        const ctx = document.getElementById('accuracyChart').getContext('2d');
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: ${JSON.stringify(stats.accuracyHistory.map(p => p.x))},
-                datasets: [{
-                    label: 'Độ chính xác (%)',
-                    data: ${JSON.stringify(stats.accuracyHistory.map(p => p.y))},
-                    borderColor: '#10a37f',
-                    backgroundColor: 'rgba(16,163,127,0.2)',
-                    tension: 0.3,
-                    fill: true
-                }]
-            },
-            options: {
-                responsive: true,
-                plugins: { legend: { labels: { color: '#fff' } } },
-                scales: { x: { ticks: { color: '#ccc' } }, y: { min: 0, max: 100, ticks: { color: '#ccc' } } }
-            }
-        });
-    </script>
-</body>
-</html>`;
+        <script>
+            setInterval(() => {
+                fetch('/api/ditmemaysun')
+                    .then(res => res.json())
+                    .then(data => {
+                        if(data.Tong) {
+                            const div = document.querySelector('.live-data');
+                            div.textContent = `${data.Xuc_xac_1}-${data.Xuc_xac_2}-${data.Xuc_xac_3} = ${data.Tong} (${data.Ket_qua})`;
+                            div.className = `live-data ${data.Ket_qua === 'Tài' ? 'tai' : 'xiu'}`;
+                        }
+                    });
+            }, 5000);
+        </script>
+    </body>
+    </html>
+    `;
     res.send(html);
 });
 
-app.get('/', (req, res) => {
-    res.send(`<h2>🎯 Sunwin Tài Xỉu AI VIP</h2>
-        <p><a href="/sunlon">📊 JSON lịch sử</a></p>
-        <p><a href="/predict">🤖 JSON dự đoán</a></p>
-        <p><a href="/stats">📈 Giao diện thống kê siêu đẹp (Chart.js)</a></p>
-        <p>Lịch sử: ${sessionHistory.length} phiên | Models: 8 | AI tự học linh hoạt</p>`);
-});
-
+// ==================== KHỞI ĐỘNG ====================
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Server cổng ${PORT} – AI VIP đã sẵn sàng`);
-    connectWS();
+    console.log(`\n=========================================`);
+    console.log(`🚀 WORM GPT Sun.Win AI VIP Server`);
+    console.log(`=========================================`);
+    console.log(`📡 Server running on:`);
+    console.log(`   Local: http://localhost:${PORT}`);
+    console.log(`   Network: http://${getLocalIP()}:${PORT}`);
+    console.log(`=========================================`);
+    console.log(`🧠 AI Ensemble: Markov 1-10 + Streak + Adaptive Weights`);
+    console.log(`📚 Learning from up to ${MAX_HISTORY} sessions`);
+    console.log(`🔌 Connecting to Sun.Win WebSocket...`);
+    console.log(`=========================================\n`);
+    connectWebSocket();
 });
