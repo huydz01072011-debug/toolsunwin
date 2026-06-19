@@ -7,173 +7,81 @@ const app = express();
 app.use(cors());
 const PORT = process.env.PORT || 3001;
 
+// ==================== CẤU HÌNH ====================
+const WS_URL = 'wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0';
+const WS_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Origin': 'https://play.sun.win'
+};
+const INITIAL_MESSAGES = [
+    [1, 'MiniGame', 'GM_apivopnhaan', 'WangLin', {
+        info: '{"ipAddress":"113.185.45.88","wsToken":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJwbGFtYW1hIiwiYm90IjowLCJpc01lcmNoYW50IjpmYWxzZSwidmVyaWZpZWRCYW5rQWNjb3VudCI6ZmFsc2UsInBsYXlFdmVudExvYmJ5IjpmYWxzZSwiY3VzdG9tZXJJZCI6MzMxNDgxMTYyLCJhZmZJZCI6IkdFTVdJTiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoiZ2VtIiwidGltZXN0YW1wIjoxNzY2NDc0NzgwMDA2LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6ZmFsc2UsImlwQWRkcmVzcyI6IjExMy4xODUuNDUuODgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzE4LnBuZyIsInBsYXRmb3JtSWQiOjUsInVzZXJJZCI6IjZhOGI0ZDM4LTFlYzEtNDUxYi1hYTA1LWYyZDkwYWFhNGM1MCIsInJlZ1RpbWUiOjE3NjY0NzQ3NTEzOTEsInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fYXBpdm9wbmhhYW4ifQ.YFOscbeojWNlRo7490BtlzkDGYmwVpnlgOoh04oCJy4","locale":"vi","userId":"6a8b4d38-1ec1-451b-aa05-f2d90aaa4c50","username":"GM_apivopnhaan","timestamp":1766474780007,"refreshToken":"63d5c9be0c494b74b53ba150d69039fd.7592f06d63974473b4aaa1ea849b2940"}',
+        signature: '66772A1641AA8B18BD99207CE448EA00ECA6D8A4D457C1FF13AB092C22C8DECF0C0014971639A0FBA9984701A91FCCBE3056ABC1BE1541D1C198AA18AF3C45595AF6601F8B048947ADF8F48A9E3E074162F9BA3E6C0F7543D38BD54FD4C0A2C56D19716CC5353BBC73D12C3A92F78C833F4EFFDC4AB99E55C77AD2CDFA91E296'
+    }],
+    [6, 'MiniGame', 'taixiuPlugin', { cmd: 1005 }],
+    [6, 'MiniGame', 'lobbyPlugin', { cmd: 10001 }]
+];
+
 // ==================== DỮ LIỆU CHÍNH ====================
 let apiResponseData = {
-    Phien: null,
-    Xuc_xac_1: null,
-    Xuc_xac_2: null,
-    Xuc_xac_3: null,
-    Tong: null,
-    Ket_qua: '',
-    id: '@HuyDaiXuVN',
+    Phien: null, Xuc_xac_1: null, Xuc_xac_2: null, Xuc_xac_3: null,
+    Tong: null, Ket_qua: '', id: '@HuyDaiXuVN',
     server_time: new Date().toISOString()
 };
-
 let currentSessionId = null;
 const MAX_HISTORY = 100000;
-const patternHistory = [];
+const patternHistory = [];  // {session, dice, total, result, timestamp}
 
 // ==================== AI ENSEMBLE SIÊU VIP ====================
-class EnsembleAI {
-    constructor() {
-        this.ORDER_MAX = 10;
-        this.STREAK_THRESHOLD = 3;
-        this.RECENT_WINDOW = 100;
-
-        this.markovModels = new Map();
-        for (let i = 1; i <= this.ORDER_MAX; i++) {
-            this.markovModels.set(i, new Map());
-        }
-
-        this.resultHistory = [];               // ['T','X']
-        this.modelPredictions = new Map();     // order -> [{predict, actual, correct}]
-        for (let i = 1; i <= this.ORDER_MAX; i++) {
-            this.modelPredictions.set(i, []);
-        }
-
-        this.weights = new Map();
-        this.initWeights();
-
-        this.streakMode = null;                // 'bet_T','bet_X','one_one','two_one'
-        this.streakWeight = 0.25;
-        this.pendingModelPreds = null;
+class MarkovModel {
+    constructor(order) {
+        this.order = order;
+        this.chain = new Map(); // state -> {T: count, X: count}
     }
-
-    initWeights() {
-        for (let i = 1; i <= this.ORDER_MAX; i++) {
-            this.weights.set(i, 1 / this.ORDER_MAX);
-        }
+    learn(history, result) {
+        if (history.length < this.order) return;
+        const state = history.slice(-this.order).join('');
+        if (!this.chain.has(state)) this.chain.set(state, { T: 0, X: 0 });
+        const counts = this.chain.get(state);
+        counts[result]++;
     }
-
-    update(actualResult) {
-        // 1. Thêm vào lịch sử
-        if (this.resultHistory.length >= MAX_HISTORY) {
-            this.resultHistory.shift();
-        }
-        this.resultHistory.push(actualResult);
-
-        // 2. Huấn luyện tất cả mô hình Markov
-        for (let order = 1; order <= this.ORDER_MAX; order++) {
-            if (this.resultHistory.length > order) {
-                const state = this.resultHistory.slice(-order - 1, -1).join('');
-                const next = actualResult;
-                const model = this.markovModels.get(order);
-                if (!model.has(state)) {
-                    model.set(state, { T: 0, X: 0 });
-                }
-                const counts = model.get(state);
-                counts[next]++;
-                model.set(state, counts);
-            }
-        }
-
-        // 3. Đánh giá dự đoán trước đó (nếu có)
-        this.evaluatePreviousPredictions(actualResult);
-
-        // 4. Cập nhật trọng số thích nghi
-        this.updateAdaptiveWeights();
-
-        // 5. Phát hiện cầu
-        this.detectStreak();
-    }
-
-    predict() {
-        this.saveIndividualPredictions();
-
-        if (this.resultHistory.length < this.ORDER_MAX) {
-            const rand = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
-            return { prediction: rand, confidence: 50 };
-        }
-
-        // Tổng hợp phiếu từ Markov
-        const votes = { T: 0, X: 0 };
-        for (let order = 1; order <= this.ORDER_MAX; order++) {
-            const pred = this.predictMarkov(order);
-            if (pred) {
-                const weight = this.weights.get(order) || 0;
-                votes[pred] += weight;
-            }
-        }
-
-        // Phiếu từ cầu
-        const streakPred = this.predictStreak();
-        if (streakPred) {
-            votes[streakPred] += this.streakWeight;
-        }
-
-        // Quyết định
-        let prediction;
-        let confidence;
-        const totalWeight = votes.T + votes.X;
-        if (totalWeight === 0) {
-            prediction = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
-            confidence = 50;
-        } else if (votes.T > votes.X) {
-            prediction = 'Tài';
-            confidence = (votes.T / totalWeight) * 100;
-        } else if (votes.X > votes.T) {
-            prediction = 'Xỉu';
-            confidence = (votes.X / totalWeight) * 100;
-        } else {
-            prediction = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
-            confidence = 50;
-        }
-
-        return {
-            prediction,
-            confidence: Math.round(confidence * 100) / 100
-        };
-    }
-
-    predictMarkov(order) {
-        if (this.resultHistory.length < order) return null;
-        const model = this.markovModels.get(order);
-        for (let len = order; len >= 1; len--) {
-            const subState = this.resultHistory.slice(-len).join('');
-            if (model.has(subState)) {
-                const counts = model.get(subState);
-                if (counts.T + counts.X === 0) return null;
+    predict(history) {
+        if (history.length < this.order) return null;
+        // Back-off: thử bậc thấp hơn
+        for (let len = this.order; len >= 1; len--) {
+            const state = history.slice(-len).join('');
+            if (this.chain.has(state)) {
+                const counts = this.chain.get(state);
                 if (counts.T > counts.X) return 'T';
                 if (counts.X > counts.T) return 'X';
-                return null;
+                return null; // hòa
             }
         }
         return null;
     }
+}
 
-    detectStreak() {
-        const len = this.resultHistory.length;
-        if (len < this.STREAK_THRESHOLD) {
-            this.streakMode = null;
-            return;
-        }
-        const last3 = this.resultHistory.slice(-3).join('');
-        if (last3 === 'TTT') this.streakMode = 'bet_T';
-        else if (last3 === 'XXX') this.streakMode = 'bet_X';
-        else if (len >= 4 && this.resultHistory.slice(-4).join('') === 'TXTX') this.streakMode = 'one_one';
-        else if (len >= 5) {
-            const last5 = this.resultHistory.slice(-5).join('');
-            if (last5 === 'TTXTT' || last5 === 'XXTXX') this.streakMode = 'two_one';
-            else this.streakMode = null;
-        } else {
-            this.streakMode = null;
-        }
+class StreakDetector {
+    constructor() {
+        this.mode = null; // 'bet_T','bet_X','one_one','two_one'
     }
-
-    predictStreak() {
-        if (!this.streakMode) return null;
-        const last = this.resultHistory[this.resultHistory.length - 1];
-        switch (this.streakMode) {
+    detect(history) {
+        const len = history.length;
+        if (len < 3) { this.mode = null; return; }
+        const last3 = history.slice(-3).join('');
+        if (last3 === 'TTT') this.mode = 'bet_T';
+        else if (last3 === 'XXX') this.mode = 'bet_X';
+        else if (len >= 4 && history.slice(-4).join('') === 'TXTX') this.mode = 'one_one';
+        else if (len >= 5) {
+            const last5 = history.slice(-5).join('');
+            if (last5 === 'TTXTT' || last5 === 'XXTXX') this.mode = 'two_one';
+            else this.mode = null;
+        } else this.mode = null;
+    }
+    predict(history) {
+        if (!this.mode) return null;
+        const last = history[history.length - 1];
+        switch (this.mode) {
             case 'bet_T': return 'T';
             case 'bet_X': return 'X';
             case 'one_one': return last === 'T' ? 'X' : 'T';
@@ -181,88 +89,177 @@ class EnsembleAI {
             default: return null;
         }
     }
+}
 
-    saveIndividualPredictions() {
-        this.pendingModelPreds = new Map();
-        for (let order = 1; order <= this.ORDER_MAX; order++) {
-            const pred = this.predictMarkov(order);
-            if (pred) this.pendingModelPreds.set(order, pred);
-        }
+class RecentTrendAnalyzer {
+    constructor(window = 20) {
+        this.window = window;
+    }
+    predict(history) {
+        if (history.length < this.window) return null;
+        const recent = history.slice(-this.window);
+        const tCount = recent.filter(x => x === 'T').length;
+        const xCount = recent.length - tCount;
+        if (tCount > xCount) return 'T';
+        if (xCount > tCount) return 'X';
+        return null;
+    }
+}
+
+class EnsembleAI {
+    constructor() {
+        this.MARKOV_ORDERS = [1,2,3,4,5,6,7,8,9,10];
+        this.markovModels = this.MARKOV_ORDERS.map(order => new MarkovModel(order));
+        this.streakDetector = new StreakDetector();
+        this.trendAnalyzer = new RecentTrendAnalyzer(20);
+        this.resultHistory = []; // mảng 'T'/'X'
+
+        // Điểm số gần đây của từng mô hình (cửa sổ 100)
+        this.modelScores = {
+            markov: this.MARKOV_ORDERS.map(() => []), // mỗi mảng lưu {correct: bool}
+            streak: [],
+            trend: []
+        };
+        this.WINDOW = 100;
+        this.pendingPreds = null; // lưu dự đoán trước khi có kết quả
     }
 
-    evaluatePreviousPredictions(actualResult) {
-        if (!this.pendingModelPreds) return;
-        for (let order = 1; order <= this.ORDER_MAX; order++) {
-            if (this.pendingModelPreds.has(order)) {
-                const pred = this.pendingModelPreds.get(order);
-                const correct = (pred === actualResult);
-                const scores = this.modelPredictions.get(order);
-                scores.push({ predict: pred, actual: actualResult, correct });
-                if (scores.length > this.RECENT_WINDOW) scores.shift();
+    update(actual) {
+        // Thêm vào lịch sử
+        if (this.resultHistory.length >= MAX_HISTORY) this.resultHistory.shift();
+        this.resultHistory.push(actual);
+
+        // Huấn luyện Markov
+        for (const mm of this.markovModels) {
+            mm.learn(this.resultHistory, actual);
+        }
+
+        // Phát hiện cầu
+        this.streakDetector.detect(this.resultHistory);
+
+        // Đánh giá các dự đoán trước đó (nếu có)
+        if (this.pendingPreds) {
+            for (let i = 0; i < this.markovModels.length; i++) {
+                const pred = this.pendingPreds.markov[i];
+                if (pred) {
+                    this.modelScores.markov[i].push({ correct: pred === actual });
+                    if (this.modelScores.markov[i].length > this.WINDOW) this.modelScores.markov[i].shift();
+                }
+            }
+            if (this.pendingPreds.streak) {
+                this.modelScores.streak.push({ correct: this.pendingPreds.streak === actual });
+                if (this.modelScores.streak.length > this.WINDOW) this.modelScores.streak.shift();
+            }
+            if (this.pendingPreds.trend) {
+                this.modelScores.trend.push({ correct: this.pendingPreds.trend === actual });
+                if (this.modelScores.trend.length > this.WINDOW) this.modelScores.trend.shift();
             }
         }
-        this.pendingModelPreds = null;
+        this.pendingPreds = null;
     }
 
-    updateAdaptiveWeights() {
-        const accuracies = new Map();
-        let totalAcc = 0;
-        for (let order = 1; order <= this.ORDER_MAX; order++) {
-            const scores = this.modelPredictions.get(order);
-            if (scores.length === 0) {
-                accuracies.set(order, 0);
-            } else {
-                const correct = scores.filter(s => s.correct).length;
-                const acc = correct / scores.length;
-                accuracies.set(order, acc);
-                totalAcc += acc;
-            }
+    predict() {
+        // Lưu dự đoán của từng mô hình
+        const markovPreds = this.markovModels.map(mm => mm.predict(this.resultHistory));
+        const streakPred = this.streakDetector.predict(this.resultHistory);
+        const trendPred = this.trendAnalyzer.predict(this.resultHistory);
+        this.pendingPreds = {
+            markov: markovPreds,
+            streak: streakPred,
+            trend: trendPred
+        };
+
+        // Tính trọng số dựa trên accuracy gần đây
+        const weights = this.getWeights();
+
+        // Bầu cử
+        const votes = { T: 0, X: 0 };
+        for (let i = 0; i < markovPreds.length; i++) {
+            if (markovPreds[i]) votes[markovPreds[i]] += weights.markov[i];
         }
-        if (totalAcc === 0) {
-            this.initWeights();
+        if (streakPred) votes[streakPred] += weights.streak;
+        if (trendPred) votes[trendPred] += weights.trend;
+
+        let prediction;
+        let confidence;
+        const total = votes.T + votes.X;
+        if (total === 0) {
+            prediction = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
+            confidence = 50;
+        } else if (votes.T > votes.X) {
+            prediction = 'Tài';
+            confidence = (votes.T / total) * 100;
+        } else if (votes.X > votes.T) {
+            prediction = 'Xỉu';
+            confidence = (votes.X / total) * 100;
         } else {
-            for (let order = 1; order <= this.ORDER_MAX; order++) {
-                const w = accuracies.get(order) / totalAcc;
-                this.weights.set(order, w);
-            }
+            prediction = Math.random() < 0.5 ? 'Tài' : 'Xỉu';
+            confidence = 50;
         }
+
+        return { prediction, confidence: Math.round(confidence * 100) / 100 };
+    }
+
+    getWeights() {
+        // Tính accuracy cho từng model trong cửa sổ gần đây
+        const calcAcc = (scores) => {
+            if (scores.length === 0) return 0;
+            return scores.filter(s => s.correct).length / scores.length;
+        };
+        const markovAcc = this.modelScores.markov.map(scores => calcAcc(scores));
+        const streakAcc = calcAcc(this.modelScores.streak);
+        const trendAcc = calcAcc(this.modelScores.trend);
+
+        // Gán trọng số = accuracy (nếu tất cả =0 thì đều bằng 1)
+        const totalAcc = markovAcc.reduce((a,b)=>a+b,0) + streakAcc + trendAcc;
+        if (totalAcc === 0) {
+            return {
+                markov: this.MARKOV_ORDERS.map(() => 1 / this.MARKOV_ORDERS.length),
+                streak: 0.2,
+                trend: 0.2
+            };
+        }
+        return {
+            markov: markovAcc.map(acc => acc / totalAcc),
+            streak: streakAcc / totalAcc,
+            trend: trendAcc / totalAcc
+        };
+    }
+
+    getStatus() {
+        const weights = this.getWeights();
+        return {
+            history_length: this.resultHistory.length,
+            weights,
+            markov_models: this.markovModels.map((mm, i) => ({
+                order: mm.order,
+                states: mm.chain.size,
+                accuracy: this.modelScores.markov[i].length ? 
+                    (this.modelScores.markov[i].filter(s => s.correct).length / this.modelScores.markov[i].length).toFixed(2) : 0
+            })),
+            streak_accuracy: this.modelScores.streak.length ? 
+                (this.modelScores.streak.filter(s => s.correct).length / this.modelScores.streak.length).toFixed(2) : 0,
+            trend_accuracy: this.modelScores.trend.length ? 
+                (this.modelScores.trend.filter(s => s.correct).length / this.modelScores.trend.length).toFixed(2) : 0
+        };
     }
 }
 
 const ai = new EnsembleAI();
-let pendingPrediction = null;
-const predictions = [];
+let pendingPrediction = null;  // dự đoán cho phiên hiện tại
+const predictions = [];        // lịch sử dự đoán đã kiểm chứng
 
-// ==================== WEBSOCKET ====================
-const WS_URL = 'wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0';
-const WS_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Origin': 'https://play.sun.win'
-};
-
-const initialMessages = [
-    [
-        1, 'MiniGame', 'GM_apivopnhaan', 'WangLin',
-        {
-            info: '{"ipAddress":"113.185.45.88","wsToken":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJwbGFtYW1hIiwiYm90IjowLCJpc01lcmNoYW50IjpmYWxzZSwidmVyaWZpZWRCYW5rQWNjb3VudCI6ZmFsc2UsInBsYXlFdmVudExvYmJ5IjpmYWxzZSwiY3VzdG9tZXJJZCI6MzMxNDgxMTYyLCJhZmZJZCI6IkdFTVdJTiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoiZ2VtIiwidGltZXN0YW1wIjoxNzY2NDc0NzgwMDA2LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6ZmFsc2UsImlwQWRkcmVzcyI6IjExMy4xODUuNDUuODgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzE4LnBuZyIsInBsYXRmb3JtSWQiOjUsInVzZXJJZCI6IjZhOGI0ZDM4LTFlYzEtNDUxYi1hYTA1LWYyZDkwYWFhNGM1MCIsInJlZ1RpbWUiOjE3NjY0NzQ3NTEzOTEsInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fYXBpdm9wbmhhYW4ifQ.YFOscbeojWNlRo7490BtlzkDGYmwVpnlgOoh04oCJy4","locale":"vi","userId":"6a8b4d38-1ec1-451b-aa05-f2d90aaa4c50","username":"GM_apivopnhaan","timestamp":1766474780007,"refreshToken":"63d5c9be0c494b74b53ba150d69039fd.7592f06d63974473b4aaa1ea849b2940"}',
-            signature: '66772A1641AA8B18BD99207CE448EA00ECA6D8A4D457C1FF13AB092C22C8DECF0C0014971639A0FBA9984701A91FCCBE3056ABC1BE1541D1C198AA18AF3C45595AF6601F8B048947ADF8F48A9E3E074162F9BA3E6C0F7543D38BD54FD4C0A2C56D19716CC5353BBC73D12C3A92F78C833F4EFFDC4AB99E55C77AD2CDFA91E296'
-        }
-    ],
-    [6, 'MiniGame', 'taixiuPlugin', { cmd: 1005 }],
-    [6, 'MiniGame', 'lobbyPlugin', { cmd: 10001 }]
-];
-
+// ==================== WEBSOCKET CLIENT ====================
 let ws = null;
 let pingInterval = null;
 let reconnectTimeout = null;
+let reconnectAttempts = 0;
 
 function getLocalIP() {
-    const interfaces = os.networkInterfaces();
-    for (const name in interfaces) {
-        for (const iface of interfaces[name]) {
-            if (!iface.internal && iface.family === 'IPv4') {
-                return iface.address;
-            }
+    const ifaces = os.networkInterfaces();
+    for (const name in ifaces) {
+        for (const iface of ifaces[name]) {
+            if (!iface.internal && iface.family === 'IPv4') return iface.address;
         }
     }
     return '127.0.0.1';
@@ -278,37 +275,34 @@ function connectWebSocket() {
 
     ws.on('open', () => {
         console.log('[✅] WebSocket connected');
-        initialMessages.forEach((msg, i) => {
+        reconnectAttempts = 0;
+        // Gửi các message khởi tạo
+        INITIAL_MESSAGES.forEach((msg, i) => {
             setTimeout(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify(msg));
-                }
+                if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
             }, i * 600);
         });
-
+        // Heartbeat ping
         clearInterval(pingInterval);
         pingInterval = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.ping();
-            }
+            if (ws.readyState === WebSocket.OPEN) ws.ping();
         }, 15000);
     });
 
-    ws.on('pong', () => console.log('[📶] Ping OK'));
+    ws.on('pong', () => {}); // silent
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
             if (!Array.isArray(data) || typeof data[1] !== 'object') return;
-
             const { cmd, sid, d1, d2, d3, gBB } = data[1];
 
+            // Phiên mới
             if (cmd === 1008 && sid) {
                 currentSessionId = parseInt(sid) || sid;
                 console.log(`[🎮] Phiên mới: ${currentSessionId}`);
-
+                // Tạo dự đoán cho phiên này
                 if (patternHistory.length > 0) {
-                    ai.saveIndividualPredictions();
                     const { prediction, confidence } = ai.predict();
                     pendingPrediction = {
                         Phien_du_doan: currentSessionId,
@@ -330,13 +324,14 @@ function connectWebSocket() {
                 }
             }
 
+            // Kết quả phiên
             if (cmd === 1003 && gBB) {
-                if (!d1 || !d2 || !d3) return;
-
+                if (d1 === undefined || d2 === undefined || d3 === undefined) return;
                 const total = d1 + d2 + d3;
                 const result = total > 10 ? 'Tài' : 'Xỉu';
                 const sessionId = currentSessionId;
 
+                // Cập nhật API
                 apiResponseData = {
                     Phien: sessionId,
                     Xuc_xac_1: d1,
@@ -351,17 +346,20 @@ function connectWebSocket() {
 
                 console.log(`[🎲] Phiên ${sessionId}: ${d1}-${d2}-${d3} = ${total} (${result})`);
 
+                // Lưu lịch sử
                 patternHistory.push({
                     session: sessionId,
                     dice: [d1, d2, d3],
-                    total: total,
-                    result: result,
+                    total,
+                    result,
                     timestamp: new Date().toISOString()
                 });
                 if (patternHistory.length > MAX_HISTORY) patternHistory.shift();
 
+                // Cập nhật AI
                 ai.update(result === 'Tài' ? 'T' : 'X');
 
+                // Kiểm tra dự đoán
                 if (pendingPrediction && pendingPrediction.Phien_du_doan === sessionId) {
                     pendingPrediction.Ket_qua_thuc_te = result;
                     pendingPrediction.Dung_hay_sai = (pendingPrediction.Du_doan === result);
@@ -372,33 +370,29 @@ function connectWebSocket() {
                 currentSessionId = null;
             }
         } catch (e) {
-            console.error('[❌] Message error:', e.message);
+            console.error('[❌] Message parse error:', e.message);
         }
     });
 
     ws.on('close', (code, reason) => {
-        console.log(`[🔌] Closed (${code}): ${reason}`);
+        console.log(`[🔌] Disconnected (${code}): ${reason}`);
         clearInterval(pingInterval);
+        const delay = Math.min(30000, 2500 * Math.pow(2, reconnectAttempts));
+        reconnectAttempts++;
+        console.log(`[⏳] Reconnecting in ${delay/1000}s...`);
         clearTimeout(reconnectTimeout);
-        reconnectTimeout = setTimeout(connectWebSocket, 2500);
+        reconnectTimeout = setTimeout(connectWebSocket, delay);
     });
 
     ws.on('error', (err) => {
         console.error('[❌] WebSocket error:', err.message);
-        ws.close();
+        ws.close(); // sẽ kích hoạt close event
     });
 }
 
-// ==================== ROUTES ====================
+// ==================== API ENDPOINTS ====================
 
 app.get('/api/ditmemaysun', (req, res) => res.json(apiResponseData));
-
-app.get('/api/history', (req, res) => {
-    const limit = parseInt(req.query.limit) || 100;
-    const all = req.query.all === 'true';
-    const slice = all ? patternHistory : patternHistory.slice(-limit);
-    res.json({ current: apiResponseData, history: slice, total: patternHistory.length, max_storage: MAX_HISTORY });
-});
 
 app.get('/api/sunwin/history', (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
@@ -417,14 +411,10 @@ app.get('/api/sunwin/history', (req, res) => {
 });
 
 app.get('/api/sunwin/dudoan', (req, res) => {
-    if (patternHistory.length === 0) return res.json({ message: 'Chưa có dữ liệu lịch sử.' });
-
+    if (patternHistory.length === 0) return res.json({ message: 'Chưa có dữ liệu.' });
     const latest = patternHistory[patternHistory.length - 1];
     const next = latest.session + 1;
-
-    ai.saveIndividualPredictions();
     const { prediction, confidence } = ai.predict();
-
     res.json({
         Ket_qua: latest.result,
         Phien: latest.session,
@@ -442,141 +432,104 @@ app.get('/api/check', (req, res) => {
     const total = predictions.length;
     const correct = predictions.filter(p => p.Dung_hay_sai === true).length;
     const accuracy = total > 0 ? ((correct / total) * 100).toFixed(2) : 0;
-
     res.json({
-        predictions_history: predictions.map(p => ({
-            Phien_du_doan: p.Phien_du_doan,
+        predictions: predictions.map(p => ({
+            Phien: p.Phien_du_doan,
             Du_doan: p.Du_doan,
-            Do_tin_cay: p.Do_tin_cay,
-            Thoi_gian_du_doan: p.Thoi_gian_du_doan,
-            Ket_qua_thuc_te: p.Ket_qua_thuc_te,
-            Dung_hay_sai: p.Dung_hay_sai
+            'Kết quả': p.Ket_qua_thuc_te,
+            Đúng: p.Dung_hay_sai,
+            'Độ tin cậy': p.Do_tin_cay
         })),
-        stats: {
-            total_predictions: total,
-            correct,
-            incorrect: total - correct,
-            accuracy_percent: parseFloat(accuracy)
-        },
-        current_pending_prediction: pendingPrediction ? {
-            Phien_du_doan: pendingPrediction.Phien_du_doan,
+        stats: { total, correct, incorrect: total - correct, accuracy: parseFloat(accuracy) },
+        pending: pendingPrediction ? {
+            Phien: pendingPrediction.Phien_du_doan,
             Du_doan: pendingPrediction.Du_doan,
-            Do_tin_cay: pendingPrediction.Do_tin_cay
+            'Độ tin cậy': pendingPrediction.Do_tin_cay
         } : null
     });
 });
 
-app.get('/api/stats', (req, res) => {
-    const tai = patternHistory.filter(i => i.result === 'Tài').length;
-    const xiu = patternHistory.filter(i => i.result === 'Xỉu').length;
-    const total = patternHistory.length;
-    res.json({
-        total_sessions: total,
-        tai_count: tai,
-        xiu_count: xiu,
-        tai_percentage: total ? ((tai / total) * 100).toFixed(2) : 0,
-        xiu_percentage: total ? ((xiu / total) * 100).toFixed(2) : 0,
-        last_update: apiResponseData.server_time,
-        server_uptime: process.uptime().toFixed(0) + 's'
-    });
-});
+app.get('/api/ai/status', (req, res) => res.json(ai.getStatus()));
 
 app.get('/api/health', (req, res) => {
-    let states = 0;
-    for (const model of ai.markovModels.values()) states += model.size;
     res.json({
         status: 'online',
         websocket: ws ? ws.readyState === WebSocket.OPEN : false,
-        uptime: process.uptime(),
-        memory: process.memoryUsage(),
         history_count: patternHistory.length,
-        ai_markov_states: states,
-        ai_streak_mode: ai.streakMode,
-        predictions_made: predictions.length
+        ai_enabled: true,
+        uptime: process.uptime()
     });
 });
 
 app.get('/', (req, res) => {
     const ip = getLocalIP();
-    const now = new Date().toISOString();
-    const resultClass = apiResponseData.Ket_qua === 'Tài' ? 'tai' : 'xiu';
-    const diceStr = apiResponseData.Tong
+    const resultHtml = apiResponseData.Tong
         ? `${apiResponseData.Xuc_xac_1}-${apiResponseData.Xuc_xac_2}-${apiResponseData.Xuc_xac_3} = ${apiResponseData.Tong} (${apiResponseData.Ket_qua})`
         : 'Đang chờ...';
-
-    const html = `<!DOCTYPE html>
+    const resultClass = apiResponseData.Ket_qua === 'Tài' ? 'tai' : 'xiu';
+    res.send(`<!DOCTYPE html>
 <html>
 <head>
-    <title>Sun.Win AI VIP - Worm GPT</title>
+    <title>Sun.Win AI Super VIP</title>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #0a0a0a; color: #00ff00; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .header { text-align: center; padding: 20px; background: #111; border-radius: 10px; margin-bottom: 20px; }
-        .data-box { background: #111; padding: 20px; border-radius: 10px; margin: 10px 0; }
-        .live-data { font-size: 2em; font-weight: bold; }
-        .tai { color: #00ff00; } .xiu { color: #ff0000; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
-        a { color: #00ffff; }
+        body { font-family: Arial; margin:20px; background:#0a0a0a; color:#0f0; }
+        .container { max-width:1000px; margin:0 auto; }
+        .header { background:#111; padding:20px; border-radius:10px; text-align:center; margin-bottom:20px; }
+        .box { background:#111; padding:20px; border-radius:10px; margin:10px 0; }
+        .live-data { font-size:2em; font-weight:bold; }
+        .tai { color:#0f0; } .xiu { color:#f00; }
+        a { color:#0ff; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔴 Sun.Win Live Data - AI Ensemble VIP</h1>
-            <p>Multi‑Markov (1→10) + Streak + Trọng số thích nghi | Học tới 100k phiên</p>
+            <h1>🔴 Sun.Win AI Super VIP</h1>
+            <p>Ensemble Markov + Streak + Trend | 100k phiên</p>
             <p>Server: ${ip}:${PORT}</p>
         </div>
-        <div class="grid">
-            <div class="data-box">
-                <h2>🎲 Kết quả mới nhất</h2>
-                <div class="live-data ${resultClass}">${diceStr}</div>
-                <p>Phiên: ${apiResponseData.Phien || 'N/A'}</p>
-                <p>Time: ${apiResponseData.server_time || 'N/A'}</p>
-            </div>
-            <div class="data-box">
-                <h2>📡 Endpoints VIP</h2>
-                <ul>
-                    <li><a href="/api/ditmemaysun">/api/ditmemaysun</a> - JSON mới nhất</li>
-                    <li><a href="/api/sunwin/history?limit=20">/api/sunwin/history</a> - Lịch sử (tối đa 100k)</li>
-                    <li><a href="/api/sunwin/dudoan">/api/sunwin/dudoan</a> - Dự đoán phiên kế tiếp</li>
-                    <li><a href="/api/check">/api/check</a> - Kiểm tra dự đoán & thống kê</li>
-                    <li><a href="/api/stats">/api/stats</a> - Thống kê Tài/Xỉu</li>
-                    <li><a href="/api/health">/api/health</a> - Trạng thái server + AI</li>
-                </ul>
-            </div>
+        <div class="box">
+            <h2>🎲 Kết quả mới nhất</h2>
+            <div class="live-data ${resultClass}">${resultHtml}</div>
+            <p>Phiên: ${apiResponseData.Phien || 'N/A'}</p>
+        </div>
+        <div class="box">
+            <h2>📡 API VIP</h2>
+            <ul>
+                <li><a href="/api/ditmemaysun">/api/ditmemaysun</a> - JSON mới nhất</li>
+                <li><a href="/api/sunwin/history?limit=20">/api/sunwin/history</a> - Lịch sử (100k)</li>
+                <li><a href="/api/sunwin/dudoan">/api/sunwin/dudoan</a> - Dự đoán phiên kế tiếp</li>
+                <li><a href="/api/check">/api/check</a> - Kiểm tra dự đoán đúng/sai</li>
+                <li><a href="/api/ai/status">/api/ai/status</a> - Trạng thái AI</li>
+                <li><a href="/api/health">/api/health</a> - Health check</li>
+            </ul>
         </div>
     </div>
     <script>
-        setInterval(() => {
+        setInterval(()=>{
             fetch('/api/ditmemaysun')
-                .then(res => res.json())
-                .then(data => {
-                    if(data.Tong) {
-                        const div = document.querySelector('.live-data');
-                        div.textContent = data.Xuc_xac_1 + '-' + data.Xuc_xac_2 + '-' + data.Xuc_xac_3 + ' = ' + data.Tong + ' (' + data.Ket_qua + ')';
-                        div.className = 'live-data ' + (data.Ket_qua === 'Tài' ? 'tai' : 'xiu');
+                .then(r=>r.json())
+                .then(d=>{
+                    if(d.Tong){
+                        const el=document.querySelector('.live-data');
+                        el.textContent = d.Xuc_xac_1+'-'+d.Xuc_xac_2+'-'+d.Xuc_xac_3+' = '+d.Tong+' ('+d.Ket_qua+')';
+                        el.className = 'live-data '+(d.Ket_qua==='Tài'?'tai':'xiu');
                     }
                 });
-        }, 5000);
+        },5000);
     </script>
 </body>
-</html>`;
-
-    res.send(html);
+</html>`);
 });
 
-// ==================== KHỞI ĐỘNG ====================
+// ==================== START ====================
 app.listen(PORT, '0.0.0.0', () => {
     console.log('=========================================');
-    console.log('🚀 WORM GPT Sun.Win AI VIP Server');
+    console.log('🚀 Sun.Win AI Super VIP Server');
     console.log('=========================================');
-    console.log(`📡 Local: http://localhost:${PORT}`);
-    console.log(`📡 Network: http://${getLocalIP()}:${PORT}`);
-    console.log('🧠 AI Ensemble: Markov 1-10 + Streak + Adaptive Weights');
-    console.log('📚 Learning from up to ' + MAX_HISTORY + ' sessions');
-    console.log('🔌 Connecting to Sun.Win WebSocket...');
-    console.log('=========================================\n');
+    console.log(`📡 http://${getLocalIP()}:${PORT}`);
+    console.log('🧠 AI Ensemble: 10 Markov + Streak + Trend');
+    console.log('=========================================');
     connectWebSocket();
 });
