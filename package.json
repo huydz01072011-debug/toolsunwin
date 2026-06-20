@@ -1,18 +1,13 @@
 {
-  "name": "sunwin-ai-vip-server",
-  "version": "3.1.0",
-  "description": "Sun.Win AI VIP - Ensemble Markov + Streak học 100k phiên",
-  "main": "server.js",
+  "name": "telegram-bot-lc79",
+  "version": "1.0.0",
+  "description": "Bot Telegram đăng nhập game LC79",
+  "main": "bot.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "echo \"No test specified\" && exit 0"
+    "start": "node server.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "ws": "^8.16.0"
-  },
-  "keywords": ["sunwin", "tai-xiu", "ai", "markov", "ensemble"],
-  "author": "Worm GPT VIP",
-  "license": "ISC"
+    "axios": "^1.6.0",
+    "node-telegram-bot-api": "^0.64.0"
+  }
 }
