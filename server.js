@@ -2,7 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const crypto = require('crypto');
 
-const BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE';
+const BOT_TOKEN = '8792790286:AAHuxMzba8iOyyrXhrKHOwLxIX6Ie8urAhY';
 const API_BASE = 'https://apifo88daigia.tele68.com/api';
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -95,4 +95,12 @@ bot.on('message', async (msg) => {
   }
 });
 
-console.log('Bot dang chay...');
+// Bắt lỗi polling và thông báo
+bot.on('polling_error', (error) => {
+  console.error('Polling error:', error.message);
+  if (error.code === 'ETELEGRAM' && error.message.includes('404')) {
+    console.log('Token bot không hợp lệ hoặc bot chưa được tạo. Hãy kiểm tra lại BOT_TOKEN.');
+  }
+});
+
+console.log('Bot đang chạy...');
