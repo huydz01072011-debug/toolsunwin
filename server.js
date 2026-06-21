@@ -57,7 +57,6 @@ Danh sách lệnh:
 
 bot.onText(/\/login/, (msg) => {
   const chatId = msg.chat.id;
-  // Nếu đã có state và đã login (có ws) thì thông báo
   const state = userStates.get(chatId);
   if (state && state.ws && state.ws.readyState === WebSocket.OPEN) {
     bot.sendMessage(chatId, '⚠️ Bạn đã đăng nhập rồi. Dùng /logout nếu muốn đổi tài khoản.');
@@ -80,7 +79,7 @@ bot.onText(/\/logout/, (msg) => {
 bot.onText(/\/balance/, (msg) => {
   const chatId = msg.chat.id;
   const state = userStates.get(chatId);
-  if (!state || !state.balance) {
+  if (!state || state.balance === undefined) {
     bot.sendMessage(chatId, '❌ Bạn cần đăng nhập trước. Dùng /login');
     return;
   }
@@ -147,17 +146,30 @@ bot.on('message', async (msg) => {
       const response = await axios.get(url, { timeout: 10000 });
       const data = response.data;
 
-      if (data.success) {
-        // Parse session để lấy token
-        let sessionJson = {};
-        try {
-          const decoded = Buffer.from(data.sessionKey, 'base64').toString('utf8');
-          sessionJson = JSON.parse(decoded);
-        } catch (e) {}
+      // Log response để debug
+      console.log('Login response:', JSON.stringify(data, null, 2));
 
-        const token = sessionJson.token || null;
+      if (data.success) {
+        let token = null;
+        // Ưu tiên lấy token từ data.token
+        if (data.token) {
+          token = data.token;
+        } else if (data.accessToken) {
+          token = data.accessToken;
+        } else {
+          // Nếu không, parse sessionKey
+          try {
+            const decoded = Buffer.from(data.sessionKey, 'base64').toString('utf8');
+            const sessionJson = JSON.parse(decoded);
+            token = sessionJson.token || sessionJson.accessToken || null;
+          } catch (e) {
+            console.error('Parse sessionKey error:', e.message);
+          }
+        }
+
         if (!token) {
-          bot.sendMessage(chatId, '❌ Không lấy được token từ session, vui lòng thử lại.');
+          bot.sendMessage(chatId, '❌ Không lấy được token từ response login. Vui lòng kiểm tra log và báo lại cho dev.');
+          console.log('Raw data:', data);
           return;
         }
 
@@ -165,13 +177,13 @@ bot.on('message', async (msg) => {
         const newState = {
           step: null,
           username: username,
-          balance: sessionJson.money || 0,
+          balance: 0, // sẽ cập nhật sau
           token: token,
           ws: null,
           wsReady: false,
-          // Hàng đợi cho bet
           betResolve: null,
           betReject: null,
+          betTimeout: null,
         };
         userStates.set(chatId, newState);
 
@@ -183,11 +195,18 @@ bot.on('message', async (msg) => {
           ws.on('open', () => {
             console.log(`WebSocket connected for user ${username}`);
             // Gửi token xác thực
-            ws.send(`40/txmd5,${JSON.stringify({ token })}`);
+            const authMsg = `40/txmd5,${JSON.stringify({ token })}`;
+            ws.send(authMsg);
+            console.log(`Sent auth: ${authMsg}`);
           });
 
           ws.on('message', (data) => {
             const message = data.toString();
+            // Xử lý ping/pong: nếu là "2" thì gửi "3"
+            if (message === '2') {
+              ws.send('3');
+              return;
+            }
             handleWebSocketMessage(chatId, message);
           });
 
@@ -208,12 +227,8 @@ bot.on('message', async (msg) => {
           // Lưu ws vào state
           userStates.set(chatId, newState);
 
-          // Đợi một chút cho WebSocket sẵn sàng (có thể nhận được sid và tick-update)
-          // Nhưng không cần chờ, vì các message sẽ được xử lý bất đồng bộ.
-
           let reply = `✅ Đăng nhập thành công!\n`;
-          reply += `Tên: ${sessionJson.nickname || username}\n`;
-          reply += `Số dư: ${(sessionJson.money || 0).toLocaleString()} Vin\n`;
+          reply += `Tên: ${username}\n`;
           reply += `Đang kết nối WebSocket...\n`;
           reply += `\n💡 Dùng /bet để đặt cược, /balance xem số dư.`;
           bot.sendMessage(chatId, reply);
@@ -280,7 +295,6 @@ bot.on('message', async (msg) => {
 
     // Tạo promise để chờ kết quả
     const betPromise = new Promise((resolve, reject) => {
-      // Lưu resolve và reject vào state
       const st = userStates.get(chatIdForResponse);
       if (!st) {
         reject(new Error('State not found'));
@@ -288,7 +302,6 @@ bot.on('message', async (msg) => {
       }
       st.betResolve = resolve;
       st.betReject = reject;
-      // Timeout sau 15 giây
       st.betTimeout = setTimeout(() => {
         reject(new Error('Timeout, không nhận được kết quả từ server'));
         const st2 = userStates.get(chatIdForResponse);
@@ -309,7 +322,6 @@ bot.on('message', async (msg) => {
       bot.sendMessage(chatId, `⏳ Đang gửi lệnh đặt cược ${betType} ${betAmount}...`);
     } catch (err) {
       bot.sendMessage(chatId, `❌ Lỗi gửi lệnh: ${err.message}`);
-      // Cleanup
       const st = userStates.get(chatId);
       if (st) {
         st.betResolve = null;
@@ -323,7 +335,6 @@ bot.on('message', async (msg) => {
     // Chờ kết quả
     try {
       const result = await betPromise;
-      // result là { postBalance, amount, type }
       bot.sendMessage(chatId,
 `🎉 Đặt cược thành công!
 Loại: ${result.type}
@@ -339,7 +350,6 @@ Số dư mới: ${result.postBalance.toLocaleString()} Vin`
     } catch (err) {
       bot.sendMessage(chatId, `❌ Đặt cược thất bại: ${err.message}`);
     } finally {
-      // Cleanup
       const st = userStates.get(chatId);
       if (st) {
         st.betResolve = null;
@@ -360,36 +370,30 @@ function handleWebSocketMessage(chatId, message) {
   const state = userStates.get(chatId);
   if (!state) return;
 
-  // Log để debug
+  // Log để debug (có thể comment bớt)
   console.log(`WS received: ${message}`);
 
-  // Kiểm tra định dạng: bắt đầu bằng "42/txmd5,"
+  // Xử lý message dạng "42/txmd5,..." hoặc "42/txmd5,[...]"
   if (!message.startsWith('42/txmd5,')) {
-    // Có thể là ping/pong hoặc các message khác, bỏ qua
     return;
   }
 
-  // Lấy payload sau dấu phẩy
   const payload = message.substring('42/txmd5,'.length);
   try {
     const data = JSON.parse(payload);
-    // data là mảng, ví dụ ["tick-update", {...}] hoặc ["bet-result", {...}]
     if (!Array.isArray(data) || data.length < 2) return;
 
     const event = data[0];
     const body = data[1];
 
     if (event === 'tick-update') {
-      // Có thể cập nhật thông tin bàn, không cần xử lý đặc biệt
-      // Nhưng có thể lấy md5, id nếu cần
+      // Có thể cập nhật thông tin bàn, không xử lý
     } else if (event === 'bet-result') {
-      // Đây là kết quả đặt cược
       const result = body;
       if (result.postBalance !== undefined && result.amount !== undefined && result.type) {
-        // Có một promise đang chờ
+        // Có promise đang chờ
         if (state.betResolve) {
           state.betResolve(result);
-          // Xóa resolve để tránh gọi nhiều lần
           state.betResolve = null;
           state.betReject = null;
           if (state.betTimeout) {
@@ -398,18 +402,25 @@ function handleWebSocketMessage(chatId, message) {
           }
           userStates.set(chatId, state);
         } else {
-          // Có thể là kết quả không đồng bộ, thông báo cho user
+          // Kết quả không đồng bộ, thông báo cho user
           bot.sendMessage(chatId,
 `📢 Kết quả cược tự động:
 Loại: ${result.type}
 Số tiền: ${result.amount.toLocaleString()} Vin
 Số dư mới: ${result.postBalance.toLocaleString()} Vin`
           );
-          // Cập nhật balance
           state.balance = result.postBalance;
           userStates.set(chatId, state);
         }
       }
+    } else if (event === 'your-info') {
+      // Cập nhật balance từ your-info
+      if (body.balance !== undefined) {
+        state.balance = body.balance;
+        userStates.set(chatId, state);
+      }
+    } else if (event === 'session-info') {
+      // Có thể lấy md5, id
     }
   } catch (e) {
     console.error('Parse WS message error:', e.message);
