@@ -1,10 +1,11 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const crypto = require('crypto');
+const WebSocket = require('ws');
 
 const BOT_TOKEN = '8792790286:AAHuxMzba8iOyyrXhrKHOwLxIX6Ie8urAhY'.trim();
 const API_BASE = 'https://apifo88daigia.tele68.com/api';
-const TABLE_MD5 = 'a944f524ee23cb617d19095e31539926'; // từ log của thím
+const WS_URL = 'wss://wtxmd52.tele68.com/txmd5/?EIO=4&transport=websocket';
 
 // Kiểm tra token khởi động
 (async () => {
@@ -28,7 +29,7 @@ const TABLE_MD5 = 'a944f524ee23cb617d19095e31539926'; // từ log của thím
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// Lưu state của từng user: { step, username, sessionData, betType, amount, ... }
+// State lưu cho từng user
 const userStates = new Map();
 
 bot.on('polling_error', (error) => {
@@ -39,25 +40,26 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// -------- LỆNH CHÍNH --------
+// -------------------- LỆNH --------------------
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 
+  bot.sendMessage(chatId,
 `🎯 CHÀO MỪNG ĐẾN BOT VIP LC79 🎯
 Danh sách lệnh:
-/start - Xem hướng dẫn
-/login - Đăng nhập tài khoản game
-/logout - Xoá thông tin đăng nhập
+/start - Hướng dẫn
+/login - Đăng nhập tài khoản
+/logout - Xoá session & ngắt WebSocket
 /balance - Xem số dư hiện tại
-/bet - Đặt cược Tài / Xỉu (yêu cầu đã login)
-/cancel - Hủy thao tác đang thực hiện
+/bet - Đặt cược Tài / Xỉu
+/cancel - Huỷ thao tác đang thực hiện
 `);
 });
 
 bot.onText(/\/login/, (msg) => {
   const chatId = msg.chat.id;
-  // Nếu đã có session thì thông báo
-  if (userStates.has(chatId) && userStates.get(chatId).sessionData) {
+  // Nếu đã có state và đã login (có ws) thì thông báo
+  const state = userStates.get(chatId);
+  if (state && state.ws && state.ws.readyState === WebSocket.OPEN) {
     bot.sendMessage(chatId, '⚠️ Bạn đã đăng nhập rồi. Dùng /logout nếu muốn đổi tài khoản.');
     return;
   }
@@ -67,37 +69,31 @@ bot.onText(/\/login/, (msg) => {
 
 bot.onText(/\/logout/, (msg) => {
   const chatId = msg.chat.id;
-  if (userStates.has(chatId)) {
-    userStates.delete(chatId);
-    bot.sendMessage(chatId, '✅ Đã xoá session đăng nhập.');
-  } else {
-    bot.sendMessage(chatId, 'Bạn chưa đăng nhập.');
+  const state = userStates.get(chatId);
+  if (state && state.ws) {
+    try { state.ws.close(); } catch (e) {}
   }
+  userStates.delete(chatId);
+  bot.sendMessage(chatId, '✅ Đã xoá session và ngắt kết nối.');
 });
 
-bot.onText(/\/balance/, async (msg) => {
+bot.onText(/\/balance/, (msg) => {
   const chatId = msg.chat.id;
   const state = userStates.get(chatId);
-  if (!state || !state.sessionData) {
+  if (!state || !state.balance) {
     bot.sendMessage(chatId, '❌ Bạn cần đăng nhập trước. Dùng /login');
     return;
   }
-  const data = state.sessionData;
-  let reply = `💰 Số dư hiện tại:\n`;
-  reply += `Vin: ${(data.vinTotal || 0).toLocaleString()}\n`;
-  reply += `VIP Point: ${(data.vippoint || 0).toLocaleString()}\n`;
-  reply += `VIP Point Save: ${(data.vippointSave || 0).toLocaleString()}`;
-  bot.sendMessage(chatId, reply);
+  bot.sendMessage(chatId, `💰 Số dư hiện tại: ${state.balance.toLocaleString()} Vin`);
 });
 
-bot.onText(/\/bet/, async (msg) => {
+bot.onText(/\/bet/, (msg) => {
   const chatId = msg.chat.id;
   const state = userStates.get(chatId);
-  if (!state || !state.sessionData) {
-    bot.sendMessage(chatId, '❌ Cần đăng nhập trước khi đặt cược. Dùng /login');
+  if (!state || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    bot.sendMessage(chatId, '❌ Cần đăng nhập và kết nối WebSocket. Dùng /login');
     return;
   }
-  // Bắt đầu quy trình đặt cược
   state.step = 'awaiting_bet_type';
   state.betType = null;
   state.amount = null;
@@ -107,9 +103,8 @@ bot.onText(/\/bet/, async (msg) => {
 
 bot.onText(/\/cancel/, (msg) => {
   const chatId = msg.chat.id;
-  if (userStates.has(chatId)) {
-    const state = userStates.get(chatId);
-    // Không xoá session, chỉ reset step
+  const state = userStates.get(chatId);
+  if (state) {
     state.step = null;
     state.betType = null;
     state.amount = null;
@@ -120,7 +115,7 @@ bot.onText(/\/cancel/, (msg) => {
   }
 });
 
-// -------- XỬ LÝ TIN NHẮN THƯỜNG (không phải lệnh) --------
+// -------------------- XỬ LÝ TIN NHẮN THƯỜNG --------------------
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
@@ -129,7 +124,7 @@ bot.on('message', async (msg) => {
   const state = userStates.get(chatId);
   if (!state) return;
 
-  // ---------- ĐĂNG NHẬP ----------
+  // ------ ĐĂNG NHẬP ------
   if (state.step === 'awaiting_username') {
     state.username = text.trim();
     state.step = 'awaiting_password';
@@ -143,7 +138,7 @@ bot.on('message', async (msg) => {
     const password = text.trim();
     const md5Password = crypto.createHash('md5').update(password).digest('hex');
 
-    // Xoá state tạm (chưa có sessionData)
+    // Xoá state tạm
     userStates.delete(chatId);
 
     const url = `${API_BASE}?c=3&un=${username}&pw=${md5Password}&cp=R&cl=R&pf=web&at=`;
@@ -153,58 +148,85 @@ bot.on('message', async (msg) => {
       const data = response.data;
 
       if (data.success) {
+        // Parse session để lấy token
         let sessionJson = {};
         try {
           const decoded = Buffer.from(data.sessionKey, 'base64').toString('utf8');
           sessionJson = JSON.parse(decoded);
         } catch (e) {}
 
-        const nickname = sessionJson.nickname || username;
-        const vinTotal = sessionJson.vinTotal || 0;
-        const vippoint = sessionJson.vippoint || 0;
-        const vippointSave = sessionJson.vippointSave || 0;
-        const createTime = sessionJson.createTime || 'N/A';
-        const ipAddress = sessionJson.ipAddress || 'N/A';
-        const curLevel = data.curLevel || 0;
-        const levelRatio = data.levelRatio || [];
+        const token = sessionJson.token || null;
+        if (!token) {
+          bot.sendMessage(chatId, '❌ Không lấy được token từ session, vui lòng thử lại.');
+          return;
+        }
 
-        // Lưu session vào state
+        // Tạo state mới
         const newState = {
           step: null,
           username: username,
-          sessionData: {
-            sessionKey: data.sessionKey,
-            token: sessionJson.token || null,
-            nickname,
-            vinTotal,
-            vippoint,
-            vippointSave,
-            createTime,
-            ipAddress,
-            curLevel,
-            levelRatio
-          }
+          balance: sessionJson.money || 0,
+          token: token,
+          ws: null,
+          wsReady: false,
+          // Hàng đợi cho bet
+          betResolve: null,
+          betReject: null,
         };
         userStates.set(chatId, newState);
 
-        let reply = `✅ Đăng nhập thành công!\n\n`;
-        reply += `Tên: ${nickname}\n`;
-        reply += `Cấp độ: ${curLevel}\n`;
-        reply += `Vin: ${vinTotal.toLocaleString()}\n`;
-        reply += `VIP Point: ${vippoint.toLocaleString()}\n`;
-        reply += `VIP Point Save: ${vippointSave.toLocaleString()}\n`;
-        reply += `Ngày tạo: ${createTime}\n`;
-        reply += `IP: ${ipAddress}`;
-        if (levelRatio.length > 0) {
-          reply += `\nMốc cấp độ: ${levelRatio.join(', ')}`;
-        }
-        reply += `\n\n💡 Dùng /bet để đặt cược, /balance xem số dư.`;
+        // Kết nối WebSocket
+        try {
+          const ws = new WebSocket(WS_URL);
+          newState.ws = ws;
 
-        bot.sendMessage(chatId, reply);
+          ws.on('open', () => {
+            console.log(`WebSocket connected for user ${username}`);
+            // Gửi token xác thực
+            ws.send(`40/txmd5,${JSON.stringify({ token })}`);
+          });
+
+          ws.on('message', (data) => {
+            const message = data.toString();
+            handleWebSocketMessage(chatId, message);
+          });
+
+          ws.on('close', () => {
+            console.log(`WebSocket closed for user ${username}`);
+            const st = userStates.get(chatId);
+            if (st) {
+              st.ws = null;
+              st.wsReady = false;
+              userStates.set(chatId, st);
+            }
+          });
+
+          ws.on('error', (err) => {
+            console.error(`WebSocket error for user ${username}:`, err.message);
+          });
+
+          // Lưu ws vào state
+          userStates.set(chatId, newState);
+
+          // Đợi một chút cho WebSocket sẵn sàng (có thể nhận được sid và tick-update)
+          // Nhưng không cần chờ, vì các message sẽ được xử lý bất đồng bộ.
+
+          let reply = `✅ Đăng nhập thành công!\n`;
+          reply += `Tên: ${sessionJson.nickname || username}\n`;
+          reply += `Số dư: ${(sessionJson.money || 0).toLocaleString()} Vin\n`;
+          reply += `Đang kết nối WebSocket...\n`;
+          reply += `\n💡 Dùng /bet để đặt cược, /balance xem số dư.`;
+          bot.sendMessage(chatId, reply);
+
+        } catch (wsError) {
+          console.error('WebSocket connection error:', wsError.message);
+          bot.sendMessage(chatId, '⚠️ Đăng nhập thành công nhưng không thể kết nối WebSocket. Vui lòng thử lại.');
+          userStates.delete(chatId);
+        }
+
       } else {
         const errorCode = data.errorCode || 'không rõ';
         bot.sendMessage(chatId, `❌ Đăng nhập thất bại. Mã lỗi: ${errorCode}`);
-        // Xoá state nếu lỗi
         userStates.delete(chatId);
       }
     } catch (error) {
@@ -215,10 +237,9 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // ---------- ĐẶT CƯỢC: CHỌN LOẠI ----------
+  // ------ ĐẶT CƯỢC: CHỌN LOẠI ------
   if (state.step === 'awaiting_bet_type') {
     const lower = text.toLowerCase().trim();
-    // Chấp nhận 'tai', 'xiu', 'tài', 'xỉu' (có dấu)
     if (lower === 'tai' || lower === 'tài') {
       state.betType = 'TAI';
     } else if (lower === 'xiu' || lower === 'xỉu') {
@@ -233,7 +254,7 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // ---------- ĐẶT CƯỢC: NHẬP SỐ TIỀN ----------
+  // ------ ĐẶT CƯỢC: NHẬP SỐ TIỀN ------
   if (state.step === 'awaiting_bet_amount') {
     const amount = parseInt(text.trim(), 10);
     if (isNaN(amount) || amount <= 0) {
@@ -241,54 +262,169 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // Lưu amount và reset step
+    // Reset step
+    state.step = null;
     state.amount = amount;
-    state.step = null; // kết thúc quy trình
     userStates.set(chatId, state);
 
-    // Gọi API đặt cược
-    const sessionData = state.sessionData;
-    if (!sessionData) {
-      bot.sendMessage(chatId, '❌ Session đã hết hạn, vui lòng đăng nhập lại.');
-      userStates.delete(chatId);
+    // Kiểm tra WebSocket
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      bot.sendMessage(chatId, '❌ Mất kết nối WebSocket. Vui lòng /logout rồi /login lại.');
       return;
     }
 
+    // Gửi lệnh bet qua WebSocket
     const betType = state.betType;
-    const username = state.username;
+    const betAmount = amount;
+    const chatIdForResponse = chatId;
 
-    // Dùng sessionKey để xác thực
-    const url = `${API_BASE}?c=4&un=${username}&sessionKey=${encodeURIComponent(sessionData.sessionKey)}&type=${betType}&amount=${amount}&tableMd5=${TABLE_MD5}`;
-
-    try {
-      const response = await axios.get(url, { timeout: 10000 });
-      const result = response.data;
-
-      if (result.success) {
-        // Cập nhật lại số dư (nếu API trả về balance mới)
-        if (result.balance !== undefined) {
-          sessionData.vinTotal = result.balance;
-          userStates.set(chatId, state);
-        }
-        let reply = `🎉 Đặt cược thành công!\n`;
-        reply += `Loại: ${betType === 'TAI' ? 'TÀI' : 'XỈU'}\n`;
-        reply += `Số tiền: ${amount.toLocaleString()} Vin\n`;
-        if (result.balance !== undefined) {
-          reply += `Số dư mới: ${result.balance.toLocaleString()} Vin`;
-        }
-        bot.sendMessage(chatId, reply);
-      } else {
-        const errorMsg = result.errorCode || 'lỗi không xác định';
-        bot.sendMessage(chatId, `❌ Đặt cược thất bại. Mã lỗi: ${errorMsg}`);
+    // Tạo promise để chờ kết quả
+    const betPromise = new Promise((resolve, reject) => {
+      // Lưu resolve và reject vào state
+      const st = userStates.get(chatIdForResponse);
+      if (!st) {
+        reject(new Error('State not found'));
+        return;
       }
-    } catch (error) {
-      console.error('API bet error:', error.message);
-      bot.sendMessage(chatId, '⚠️ Lỗi kết nối đến máy chủ, thử lại sau.');
+      st.betResolve = resolve;
+      st.betReject = reject;
+      // Timeout sau 15 giây
+      st.betTimeout = setTimeout(() => {
+        reject(new Error('Timeout, không nhận được kết quả từ server'));
+        const st2 = userStates.get(chatIdForResponse);
+        if (st2) {
+          st2.betResolve = null;
+          st2.betReject = null;
+          st2.betTimeout = null;
+        }
+      }, 15000);
+      userStates.set(chatIdForResponse, st);
+    });
+
+    // Gửi lệnh bet
+    try {
+      const msg = `42/txmd5,${JSON.stringify(["bet", { type: betType, amount: betAmount }])}`;
+      state.ws.send(msg);
+      console.log(`Bet sent: ${msg}`);
+      bot.sendMessage(chatId, `⏳ Đang gửi lệnh đặt cược ${betType} ${betAmount}...`);
+    } catch (err) {
+      bot.sendMessage(chatId, `❌ Lỗi gửi lệnh: ${err.message}`);
+      // Cleanup
+      const st = userStates.get(chatId);
+      if (st) {
+        st.betResolve = null;
+        st.betReject = null;
+        if (st.betTimeout) clearTimeout(st.betTimeout);
+        st.betTimeout = null;
+      }
+      return;
+    }
+
+    // Chờ kết quả
+    try {
+      const result = await betPromise;
+      // result là { postBalance, amount, type }
+      bot.sendMessage(chatId,
+`🎉 Đặt cược thành công!
+Loại: ${result.type}
+Số tiền: ${result.amount.toLocaleString()} Vin
+Số dư mới: ${result.postBalance.toLocaleString()} Vin`
+      );
+      // Cập nhật balance
+      const st = userStates.get(chatId);
+      if (st) {
+        st.balance = result.postBalance;
+        userStates.set(chatId, st);
+      }
+    } catch (err) {
+      bot.sendMessage(chatId, `❌ Đặt cược thất bại: ${err.message}`);
+    } finally {
+      // Cleanup
+      const st = userStates.get(chatId);
+      if (st) {
+        st.betResolve = null;
+        st.betReject = null;
+        if (st.betTimeout) clearTimeout(st.betTimeout);
+        st.betTimeout = null;
+        userStates.set(chatId, st);
+      }
     }
     return;
   }
 
-  // Nếu không khớp step nào, bỏ qua
+  // Không khớp step nào
 });
 
-console.log('Bot đang chạy...');
+// -------------------- XỬ LÝ MESSAGE TỪ WEBSOCKET --------------------
+function handleWebSocketMessage(chatId, message) {
+  const state = userStates.get(chatId);
+  if (!state) return;
+
+  // Log để debug
+  console.log(`WS received: ${message}`);
+
+  // Kiểm tra định dạng: bắt đầu bằng "42/txmd5,"
+  if (!message.startsWith('42/txmd5,')) {
+    // Có thể là ping/pong hoặc các message khác, bỏ qua
+    return;
+  }
+
+  // Lấy payload sau dấu phẩy
+  const payload = message.substring('42/txmd5,'.length);
+  try {
+    const data = JSON.parse(payload);
+    // data là mảng, ví dụ ["tick-update", {...}] hoặc ["bet-result", {...}]
+    if (!Array.isArray(data) || data.length < 2) return;
+
+    const event = data[0];
+    const body = data[1];
+
+    if (event === 'tick-update') {
+      // Có thể cập nhật thông tin bàn, không cần xử lý đặc biệt
+      // Nhưng có thể lấy md5, id nếu cần
+    } else if (event === 'bet-result') {
+      // Đây là kết quả đặt cược
+      const result = body;
+      if (result.postBalance !== undefined && result.amount !== undefined && result.type) {
+        // Có một promise đang chờ
+        if (state.betResolve) {
+          state.betResolve(result);
+          // Xóa resolve để tránh gọi nhiều lần
+          state.betResolve = null;
+          state.betReject = null;
+          if (state.betTimeout) {
+            clearTimeout(state.betTimeout);
+            state.betTimeout = null;
+          }
+          userStates.set(chatId, state);
+        } else {
+          // Có thể là kết quả không đồng bộ, thông báo cho user
+          bot.sendMessage(chatId,
+`📢 Kết quả cược tự động:
+Loại: ${result.type}
+Số tiền: ${result.amount.toLocaleString()} Vin
+Số dư mới: ${result.postBalance.toLocaleString()} Vin`
+          );
+          // Cập nhật balance
+          state.balance = result.postBalance;
+          userStates.set(chatId, state);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Parse WS message error:', e.message);
+  }
+}
+
+// Đóng kết nối WebSocket khi bot dừng
+process.on('SIGINT', () => {
+  console.log('Shutting down bot...');
+  for (const [chatId, state] of userStates.entries()) {
+    if (state.ws) {
+      try { state.ws.close(); } catch (e) {}
+    }
+  }
+  process.exit();
+});
+
+console.log('Bot đang chạy với WebSocket...');
