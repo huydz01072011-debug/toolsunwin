@@ -9,6 +9,9 @@ const API_BASE = 'https://apifo88daigia.tele68.com/api';
 const WS_URL = 'wss://wtxmd52.tele68.com/txmd5/?EIO=4&transport=websocket';
 const THIRD_PARTY_API = 'https://athirdparty.tele68.com/v1/jdb/account';
 
+// User-Agent bắt buộc cho API third-party
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
 // ==================== KHỞI TẠO BOT ====================
 let bot = null;
 
@@ -48,7 +51,7 @@ function setupBotHandlers() {
             `/balance - Số dư\n` +
             `/bet - Đặt cược Tài/Xỉu\n` +
             `/info - Thông tin tài khoản\n` +
-            `/token - Lấy accessToken\n` +
+            `/token - Lấy JWT token\n` +
             `/cancel - Huỷ thao tác`
         );
     });
@@ -64,7 +67,12 @@ function setupBotHandlers() {
         if (state && state.ws) {
             try { state.ws.close(); } catch (e) {}
         }
-        userStates.set(chatId, { step: 'awaiting_username', isLoggedIn: false, ws: null });
+        userStates.set(chatId, { 
+            step: 'awaiting_username', 
+            isLoggedIn: false, 
+            ws: null,
+            reconnectTimer: null
+        });
         bot.sendMessage(chatId, '🔑 Nhập tên đăng nhập:');
     });
 
@@ -78,7 +86,12 @@ function setupBotHandlers() {
                 state.reconnectTimer = null;
             }
             if (state.ws) {
-                try { state.ws.removeAllListeners(); state.ws.close(); } catch (e) {}
+                try { 
+                    state.ws.removeAllListeners(); 
+                    if (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING) {
+                        state.ws.close();
+                    }
+                } catch (e) {}
                 state.ws = null;
             }
             state.isLoggedIn = false;
@@ -128,11 +141,13 @@ function setupBotHandlers() {
             bot.sendMessage(chatId, '❌ Cần đăng nhập. Dùng /login');
             return;
         }
+        // Hiển thị JWT token (dùng cho WebSocket)
+        const jwtToken = state.jwtToken || 'Không có';
         bot.sendMessage(chatId,
-            `🔑 ACCESS TOKEN\n━━━━━━━━━━━━\n` +
-            `${state.accessToken}\n\n` +
-            `📌 Dùng cho API:\n` +
-            `${THIRD_PARTY_API}?cp=R&cl=R&pf=web&at=${state.accessToken}`
+            `🔑 JWT TOKEN (WebSocket)\n━━━━━━━━━━━━\n` +
+            `${jwtToken.substring(0, 50)}...\n\n` +
+            `📌 AccessToken (API HTTP):\n` +
+            `${state.accessToken || 'Không có'}`
         );
     });
 
@@ -204,27 +219,41 @@ function setupBotHandlers() {
             const url = `${API_BASE}?c=3&un=${username}&pw=${md5Password}&cp=R&cl=R&pf=web&at=`;
 
             try {
-                const response = await axios.get(url, { timeout: 10000 });
+                const response = await axios.get(url, { 
+                    timeout: 10000,
+                    headers: {
+                        'User-Agent': USER_AGENT
+                    }
+                });
                 const data = response.data;
 
                 console.log('📥 Login response:', JSON.stringify(data, null, 2));
 
                 if (data.success) {
-                    // ===== LẤY ACCESSTOKEN TRỰC TIẾP =====
+                    // ===== LẤY ACCESSTOKEN =====
                     const accessToken = data.accessToken || null;
                     if (!accessToken) {
-                        bot.sendMessage(chatId, '❌ Không lấy được accessToken. Vui lòng thử lại.');
+                        bot.sendMessage(chatId, '❌ Không lấy được accessToken.');
                         return;
                     }
 
-                    // ===== GIẢI MÃ SESSIONKEY =====
+                    // ===== GIẢI MÃ SESSIONKEY ĐỂ LẤY JWT TOKEN =====
                     let sessionData = {};
+                    let jwtToken = null;
                     try {
                         const decoded = Buffer.from(data.sessionKey, 'base64').toString('utf8');
                         sessionData = JSON.parse(decoded);
                         console.log('📋 Decoded sessionKey:', sessionData);
+                        // Lấy JWT token từ trường 'token' trong sessionData
+                        jwtToken = sessionData.token || sessionData.accessToken || null;
                     } catch (e) {
                         console.error('❌ Parse sessionKey error:', e.message);
+                    }
+
+                    // Nếu không có JWT trong session, dùng accessToken (nhưng accessToken ngắn, WebSocket sẽ reject)
+                    if (!jwtToken) {
+                        jwtToken = accessToken; // fallback, nhưng khả năng cao sẽ fail
+                        console.warn('⚠️ Không tìm thấy JWT token trong session, dùng accessToken làm fallback');
                     }
 
                     // ===== TẠO STATE =====
@@ -238,7 +267,8 @@ function setupBotHandlers() {
                         curLevel: data.curLevel || 0,
                         createTime: sessionData.createTime || 'N/A',
                         ipAddress: sessionData.ipAddress || 'N/A',
-                        accessToken: accessToken,  // TOKEN CHÍNH
+                        accessToken: accessToken,  // dùng cho API HTTP
+                        jwtToken: jwtToken,        // dùng cho WebSocket (JWT dài)
                         sessionKey: data.sessionKey,
                         ws: null,
                         wsReady: false,
@@ -267,7 +297,6 @@ function setupBotHandlers() {
                     if (newState.createTime !== 'N/A') {
                         reply += `📅 Ngày tạo: ${newState.createTime}\n`;
                     }
-                    reply += `\n🔑 Token: ${accessToken.substring(0, 15)}... (xem /token)`;
                     reply += `\n🔄 Đang kết nối WebSocket...`;
                     bot.sendMessage(chatId, reply);
 
@@ -348,7 +377,15 @@ function connectWebSocket(chatId) {
         state.wsReady = false;
     }
 
-    console.log(`🔌 Đang kết nối WebSocket cho ${state.username} với token: ${state.accessToken.substring(0, 15)}...`);
+    // Kiểm tra JWT token
+    if (!state.jwtToken || state.jwtToken.length < 50) {
+        console.error(`❌ JWT token không hợp lệ cho ${state.username}: ${state.jwtToken}`);
+        bot.sendMessage(chatId, '❌ JWT token không hợp lệ. Vui lòng đăng nhập lại.');
+        return;
+    }
+
+    console.log(`🔌 Đang kết nối WebSocket cho ${state.username}`);
+    console.log(`📌 JWT token: ${state.jwtToken.substring(0, 30)}...`);
 
     try {
         const ws = new WebSocket(WS_URL);
@@ -358,11 +395,12 @@ function connectWebSocket(chatId) {
 
         ws.on('open', () => {
             console.log(`✅ WebSocket đã kết nối cho ${state.username}`);
-            // Gửi token xác thực (dùng accessToken)
-            const authMsg = `40/txmd5,${JSON.stringify({ token: state.accessToken })}`;
+            // Gửi JWT token xác thực
+            const authMsg = `40/txmd5,${JSON.stringify({ token: state.jwtToken })}`;
             ws.send(authMsg);
-            console.log(`📤 Đã gửi auth: ${authMsg}`);
+            console.log(`📤 Đã gửi auth: ${authMsg.substring(0, 100)}...`);
 
+            // Sau 1 giây, yêu cầu thông tin phiên
             setTimeout(() => {
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(`42/txmd5,${JSON.stringify({ "session-info": { "id": 0 } })}`);
@@ -415,6 +453,7 @@ function handleWebSocketMessage(chatId, message) {
     const state = userStates.get(chatId);
     if (!state) return;
 
+    // Xử lý ping/pong
     if (message === '2') {
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
             state.ws.send('3');
@@ -422,36 +461,57 @@ function handleWebSocketMessage(chatId, message) {
         return;
     }
 
-    if (!message.startsWith('42/txmd5,')) return;
+    // Chỉ xử lý message dạng "42/txmd5,..."
+    if (!message.startsWith('42/txmd5,')) {
+        return;
+    }
 
     const payload = message.substring('42/txmd5,'.length);
     try {
         const data = JSON.parse(payload);
 
+        // Nếu data là mảng ["event", {...}]
         if (Array.isArray(data) && data.length >= 2) {
             const event = data[0];
             const body = data[1];
 
             if (event === 'your-info') {
-                if (body.balance !== undefined) state.balance = body.balance;
-                if (body.nickname) state.nickname = body.nickname;
+                if (body.balance !== undefined) {
+                    state.balance = body.balance;
+                }
+                if (body.nickname) {
+                    state.nickname = body.nickname;
+                }
                 state.wsReady = true;
                 state.isLoggedIn = true;
                 userStates.set(chatId, state);
                 console.log(`📊 Cập nhật balance ${state.username}: ${state.balance}`);
+                
                 if (!state._notifiedBalance) {
                     state._notifiedBalance = true;
-                    bot.sendMessage(chatId, `✅ WebSocket sẵn sàng!\n💰 Số dư: ${state.balance.toLocaleString()} Vin`);
+                    bot.sendMessage(chatId, 
+                        `✅ WebSocket sẵn sàng!\n` +
+                        `💰 Số dư: ${state.balance.toLocaleString()} Vin`
+                    );
                     userStates.set(chatId, state);
                 }
                 return;
             }
 
             if (event === 'session-info') {
-                if (body.id) state.gameId = body.id;
-                if (body.md5) state.tableMd5 = body.md5;
+                if (body.id) {
+                    state.gameId = body.id;
+                }
+                if (body.md5) {
+                    state.tableMd5 = body.md5;
+                }
                 userStates.set(chatId, state);
                 console.log(`📋 Session: gameId=${state.gameId}, md5=${state.tableMd5}`);
+                return;
+            }
+
+            if (event === 'tick-update') {
+                // Có thể lấy thông tin bàn, không xử lý
                 return;
             }
 
@@ -459,8 +519,10 @@ function handleWebSocketMessage(chatId, message) {
                 const result = body;
                 if (result.postBalance !== undefined && result.amount !== undefined && result.type) {
                     console.log(`🎯 Bet result: ${result.type} ${result.amount} -> ${result.postBalance}`);
+                    
                     state.balance = result.postBalance;
                     userStates.set(chatId, state);
+                    
                     if (state.betResolve) {
                         state.betResolve(result);
                         state.betResolve = null;
@@ -482,10 +544,15 @@ function handleWebSocketMessage(chatId, message) {
                 return;
             }
         } else if (typeof data === 'object' && data !== null) {
+            // Xử lý object kiểu {"session-info": {...}} hoặc {"your-info": {...}}
             if (data['your-info']) {
                 const info = data['your-info'];
-                if (info.balance !== undefined) state.balance = info.balance;
-                if (info.nickname) state.nickname = info.nickname;
+                if (info.balance !== undefined) {
+                    state.balance = info.balance;
+                }
+                if (info.nickname) {
+                    state.nickname = info.nickname;
+                }
                 state.wsReady = true;
                 state.isLoggedIn = true;
                 userStates.set(chatId, state);
@@ -494,8 +561,12 @@ function handleWebSocketMessage(chatId, message) {
             }
             if (data['session-info']) {
                 const info = data['session-info'];
-                if (info.id) state.gameId = info.id;
-                if (info.md5) state.tableMd5 = info.md5;
+                if (info.id) {
+                    state.gameId = info.id;
+                }
+                if (info.md5) {
+                    state.tableMd5 = info.md5;
+                }
                 userStates.set(chatId, state);
                 return;
             }
@@ -528,7 +599,10 @@ function placeBet(chatId) {
 
     const betPromise = new Promise((resolve, reject) => {
         const st = userStates.get(chatId);
-        if (!st) { reject(new Error('State not found')); return; }
+        if (!st) {
+            reject(new Error('State not found'));
+            return;
+        }
         st.betResolve = resolve;
         st.betReject = reject;
         st.betTimeout = setTimeout(() => {
@@ -560,8 +634,10 @@ function placeBet(chatId) {
         if (st) {
             st.betResolve = null;
             st.betReject = null;
-            if (st.betTimeout) clearTimeout(st.betTimeout);
-            st.betTimeout = null;
+            if (st.betTimeout) {
+                clearTimeout(st.betTimeout);
+                st.betTimeout = null;
+            }
             userStates.set(chatId, st);
         }
         return;
@@ -602,9 +678,17 @@ function placeBet(chatId) {
 process.on('SIGINT', () => {
     console.log('🛑 Đang tắt...');
     for (const [chatId, state] of userStates.entries()) {
-        if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+        if (state.reconnectTimer) {
+            clearTimeout(state.reconnectTimer);
+            state.reconnectTimer = null;
+        }
         if (state.ws) {
-            try { state.ws.removeAllListeners(); state.ws.close(); } catch (e) {}
+            try {
+                state.ws.removeAllListeners();
+                if (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING) {
+                    state.ws.close();
+                }
+            } catch (e) {}
         }
     }
     process.exit(0);
@@ -613,9 +697,17 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
     console.log('🛑 Đang tắt...');
     for (const [chatId, state] of userStates.entries()) {
-        if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+        if (state.reconnectTimer) {
+            clearTimeout(state.reconnectTimer);
+            state.reconnectTimer = null;
+        }
         if (state.ws) {
-            try { state.ws.removeAllListeners(); state.ws.close(); } catch (e) {}
+            try {
+                state.ws.removeAllListeners();
+                if (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING) {
+                    state.ws.close();
+                }
+            } catch (e) {}
         }
     }
     process.exit(0);
@@ -623,3 +715,4 @@ process.on('SIGTERM', () => {
 
 console.log('🚀 Bot LC79 VIP đang khởi động...');
 console.log('📌 Chờ kết nối Telegram...');
+console.log(`📌 User-Agent: ${USER_AGENT}`);
