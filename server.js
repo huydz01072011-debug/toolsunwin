@@ -14,10 +14,10 @@ app.use(session({
     cookie: { maxAge: 60000 * 60 * 24 }
 }));
 
-// ================= CONFIG HEADERS CHUẨN =================
+// ================= HEADERS CHUẨN (như trong ảnh) =================
 const USER_AGENT = 'Mozilla/5.0 (Linux; Android 11; SM-A105G Build/RP1A.200720.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.91 Mobile Safari/537.36';
 
-const REQUEST_HEADERS = {
+const BASE_HEADERS = {
     'sec-ch-ua-platform': '"Android"',
     'User-Agent': USER_AGENT,
     'sec-ch-ua': '"Android WebView";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
@@ -30,58 +30,78 @@ const REQUEST_HEADERS = {
     'sec-fetch-dest': 'empty',
     'referer': 'https://lc79b.bet/',
     'accept-language': 'vi-VN,vi;q=0.9,en-GB;q=0.8,en-US;q=0.7,en;q=0.6',
-    'priority': 'u=1, i'
+    'priority': 'u=1, i',
+    'car_fath_cita_crncc_cita': ''   // header rỗng như trong ảnh
 };
 
 // ================= HÀM GỌI API LOGIN =================
 async function callGameApi(username, rawPassword) {
     const hashedPw = crypto.createHash('md5').update(rawPassword).digest('hex');
     const url = `https://apifo88daigia.tele68.com/api?c=3&un=${encodeURIComponent(username)}&pw=${hashedPw}&cp=R&cl=R&pf=web&at=`;
-    const response = await fetch(url, { method: 'GET', headers: REQUEST_HEADERS });
+    const response = await fetch(url, { method: 'GET', headers: BASE_HEADERS });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
 }
 
-// ================= HÀM TỰ ĐỘNG LẤY JWT TỪ ATHIRDPARTY =================
-async function fetchJwtFromThirdParty(accessToken, sessionKey, username) {
-    // Thử một số endpoint khả dĩ
+// ================= HÀM LẤY JWT (chỉ thử 3 endpoint chính) =================
+async function fetchJwt(accessToken, sessionKey) {
     const endpoints = [
         'https://athirdparty.tele68.com/v1/auth/token',
         'https://athirdparty.tele68.com/v1/auth/login',
-        'https://athirdparty.tele68.com/api/token',
-        'https://athirdparty.tele68.com/login'
+        'https://athirdparty.tele68.com/api/token'
     ];
-
     const payloads = [
-        { accessToken, sessionKey, username },
-        { accessToken, username },
-        { token: accessToken },
-        { access_token: accessToken }
+        { accessToken, sessionKey },
+        { access_token: accessToken, session_key: sessionKey }
     ];
 
-    for (const endpoint of endpoints) {
+    for (const url of endpoints) {
         for (const body of payloads) {
             try {
-                const res = await fetch(endpoint, {
+                const res = await fetch(url, {
                     method: 'POST',
                     headers: {
-                        ...REQUEST_HEADERS,
+                        ...BASE_HEADERS,
                         'Content-Type': 'application/json',
                         'Host': 'athirdparty.tele68.com'
                     },
                     body: JSON.stringify(body)
                 });
+                const text = await res.text();
+                console.log(`\n🔍 Thử ${url} | Payload: ${JSON.stringify(body)}`);
+                console.log(`   Status: ${res.status}`);
+                console.log(`   Response: ${text.substring(0, 300)}`);
+
                 if (res.ok) {
-                    const data = await res.json();
-                    // Tìm JWT trong response (có thể là trường token, access_token, jwt, ...)
-                    const jwt = data.token || data.access_token || data.jwt || data.data?.token || null;
-                    if (jwt && jwt.startsWith('eyJ')) {
+                    let data;
+                    try { data = JSON.parse(text); } catch (e) { continue; }
+                    // Tìm JWT trong nhiều trường khác nhau
+                    const jwt = data.token || data.access_token || data.jwt || data.data?.token || data.data?.jwt || null;
+                    if (jwt && typeof jwt === 'string' && jwt.startsWith('eyJ')) {
+                        console.log(`✅✅✅ TÌM THẤY JWT tại ${url}`);
                         return jwt;
                     }
                 }
-            } catch (e) { /* bỏ qua lỗi */ }
+            } catch (e) {
+                console.log(`❌ Lỗi khi gọi ${url}: ${e.message}`);
+            }
         }
     }
+
+    // Thử GET với accessToken trong query
+    console.log('\n🔄 Thử GET /v1/auth/token?accessToken=...');
+    try {
+        const url = `https://athirdparty.tele68.com/v1/auth/token?accessToken=${accessToken}`;
+        const res = await fetch(url, { headers: { ...BASE_HEADERS, 'Host': 'athirdparty.tele68.com' } });
+        const text = await res.text();
+        console.log(`   Status: ${res.status}, Response: ${text.substring(0, 200)}`);
+        if (res.ok) {
+            const data = JSON.parse(text);
+            const jwt = data.token || data.access_token || data.jwt || null;
+            if (jwt && jwt.startsWith('eyJ')) return jwt;
+        }
+    } catch (e) {}
+
     return null;
 }
 
@@ -93,13 +113,13 @@ app.get('/', (req, res) => {
     <html lang="vi">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Đăng nhập VIP</title>
         <style>
             * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',Arial,sans-serif; }
             body { background:linear-gradient(145deg,#0a0e17,#1a1f2f); min-height:100vh; display:flex; justify-content:center; align-items:center; padding:16px; }
             .login-box { background:rgba(20,28,45,0.9); backdrop-filter:blur(10px); padding:32px 24px; border-radius:28px; border:1px solid #2a3a5a; box-shadow:0 20px 60px rgba(0,0,0,0.8); width:100%; max-width:400px; }
-            .login-box h1 { color:#00d4ff; text-align:center; font-size:26px; text-shadow:0 0 15px rgba(0,212,255,0.3); margin-bottom:4px; }
+            .login-box h1 { color:#00d4ff; text-align:center; font-size:26px; text-shadow:0 0 15px rgba(0,212,255,0.3); }
             .login-box .sub { color:#8899bb; text-align:center; margin-bottom:24px; font-size:13px; border-bottom:1px solid #2a3a5a; padding-bottom:14px; }
             .input-group { margin-bottom:18px; }
             .input-group label { display:block; color:#b0c4e8; font-size:12px; font-weight:600; margin-bottom:6px; text-transform:uppercase; letter-spacing:1px; }
@@ -116,9 +136,9 @@ app.get('/', (req, res) => {
             <h1>🎮 VIP GAME</h1>
             <div class="sub">Đăng nhập lấy Access Token & JWT tự động</div>
             <div id="errorBox" class="error-msg">Sai tài khoản hoặc mật khẩu</div>
-            <form id="loginForm" action="/login" method="POST">
-                <div class="input-group"><label>👤 Tên</label><input type="text" name="username" placeholder="Username..." required autofocus></div>
-                <div class="input-group"><label>🔒 Mật khẩu</label><input type="password" name="password" placeholder="Mật khẩu..." required></div>
+            <form action="/login" method="POST">
+                <div class="input-group"><label>👤 Tên</label><input type="text" name="username" required autofocus></div>
+                <div class="input-group"><label>🔒 Mật khẩu</label><input type="password" name="password" required></div>
                 <button type="submit">🚀 ĐĂNG NHẬP</button>
             </form>
             <div class="footer">DEEPSEEK-R1-ULTRA • Tự động lấy JWT</div>
@@ -136,18 +156,22 @@ app.post('/login', async (req, res) => {
     try {
         const apiResult = await callGameApi(username, password);
         if (!apiResult.success || apiResult.errorCode !== '0') return res.redirect('/?error=1');
-        
+
         let sessionData = {};
         try { sessionData = JSON.parse(Buffer.from(apiResult.sessionKey, 'base64').toString('utf-8')); } catch(e) { return res.redirect('/?error=1'); }
-        
+
         const accessToken = apiResult.accessToken;
         const sessionKey = apiResult.sessionKey;
 
-        // Tự động lấy JWT từ athirdparty
+        // Thử lấy JWT
         let jwtToken = null;
-        try {
-            jwtToken = await fetchJwtFromThirdParty(accessToken, sessionKey, username);
-        } catch (e) { console.error('Lỗi lấy JWT:', e.message); }
+        console.log('\n⏳ Đang tìm JWT từ athirdparty...');
+        jwtToken = await fetchJwt(accessToken, sessionKey);
+        if (jwtToken) {
+            console.log('✅ JWT đã được lấy thành công!');
+        } else {
+            console.log('❌ Không lấy được JWT tự động. Vui lòng nhập thủ công.');
+        }
 
         req.session.user = {
             username: username,
@@ -157,7 +181,7 @@ app.post('/login', async (req, res) => {
             curLevel: apiResult.curLevel,
             levelRatio: apiResult.levelRatio || [],
             raw: apiResult,
-            jwtToken: jwtToken || null   // lưu JWT nếu có
+            jwtToken: jwtToken || null
         };
         return res.redirect('/dashboard');
     } catch (error) {
@@ -166,7 +190,7 @@ app.post('/login', async (req, res) => {
     }
 });
 
-// ================= ROUTE: DASHBOARD (có hiển thị JWT và nút lấy tự động) =================
+// ================= DASHBOARD =================
 app.get('/dashboard', (req, res) => {
     if (!req.session.user) return res.redirect('/');
     const u = req.session.user;
@@ -180,14 +204,14 @@ app.get('/dashboard', (req, res) => {
     const decodedSession = JSON.stringify(info, null, 2);
     const ipAddress = info.ipAddress || 'N/A';
     const createTime = info.createTime || 'N/A';
-    const jwtToken = u.jwtToken || '';   // JWT đã lấy (nếu có)
+    const jwtToken = u.jwtToken || '';
 
     res.send(`
     <!DOCTYPE html>
     <html lang="vi">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Dashboard VIP</title>
         <style>
             * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',Arial,sans-serif; }
@@ -204,7 +228,6 @@ app.get('/dashboard', (req, res) => {
             .info-item .value.pink { color:#ff6bcd; }
             .info-item .value.cyan { color:#00e5ff; }
             .info-item.full { grid-column:span 2; }
-            
             .token-card { background:#0a101f; border-radius:14px; padding:14px; margin:12px 0; border:1px solid #1f3150; }
             .token-card .tlabel { color:#6688aa; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; display:flex; justify-content:space-between; align-items:center; }
             .token-card .tvalue { color:#b0d0ff; font-size:13px; word-break:break-all; margin-top:4px; font-family:monospace; background:#00000033; padding:8px 10px; border-radius:8px; }
@@ -212,7 +235,6 @@ app.get('/dashboard', (req, res) => {
             .copy-btn:active { background:#2a4a77; }
             .json-box { background:#0a101f; border-radius:12px; padding:12px; border:1px solid #1a2a44; margin:10px 0; max-height:150px; overflow:auto; }
             .json-box pre { color:#aaccff; font-size:11px; font-family:monospace; white-space:pre-wrap; word-break:break-all; margin:0; }
-            
             .jwt-section { background:#0d1528; border-radius:14px; padding:14px; margin:16px 0; border:1px solid #2a4a77; }
             .jwt-section .jwt-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
             .jwt-section input { flex:1; padding:12px; background:#070c18; border:1px solid #2a3f66; border-radius:12px; color:#e0ecff; font-size:13px; min-width:200px; }
@@ -221,7 +243,6 @@ app.get('/dashboard', (req, res) => {
             .jwt-section .btn-small:active { transform:scale(0.95); }
             .btn-primary { background:linear-gradient(135deg,#00aa66,#00dd88); border:none; color:#fff; padding:14px; border-radius:14px; font-weight:700; font-size:16px; width:100%; cursor:pointer; transition:0.2s; text-transform:uppercase; margin-top:10px; }
             .btn-primary:active { transform:scale(0.98); }
-            .btn-danger { background:#3a1a1a; border:1px solid #663333; color:#ff8888; padding:10px; border-radius:14px; font-weight:600; text-align:center; display:block; margin-top:12px; text-decoration:none; }
             .actions { display:flex; gap:12px; margin-top:16px; }
             .actions .btn { flex:1; padding:12px; text-align:center; background:#1a2a44; border-radius:14px; color:#b0cfff; text-decoration:none; font-weight:600; font-size:14px; border:1px solid #2a4a77; }
             .footer-dash { text-align:center; margin-top:20px; color:#334466; font-size:11px; border-top:1px solid #1a2a44; padding-top:16px; }
@@ -236,7 +257,6 @@ app.get('/dashboard', (req, res) => {
                 <h1>🎯 ${nickname}</h1>
                 <span class="badge">Level ${level}</span>
             </div>
-
             <div class="info-grid">
                 <div class="info-item"><div class="label">💰 Số dư</div><div class="value gold">${vinTotal.toLocaleString()}</div></div>
                 <div class="info-item"><div class="label">⭐ VIP Point</div><div class="value pink">${vippoint.toLocaleString()}</div></div>
@@ -244,35 +264,28 @@ app.get('/dashboard', (req, res) => {
                 <div class="info-item full"><div class="label">🌐 IP</div><div class="value" style="font-size:15px;">${ipAddress}</div></div>
             </div>
 
-            <!-- ACCESS TOKEN -->
             <div class="token-card">
-                <div class="tlabel"><span>🔑 Access Token (dùng cho API)</span> <button class="copy-btn" onclick="copyText('${accessToken}')">📋 Sao chép</button></div>
+                <div class="tlabel"><span>🔑 Access Token</span> <button class="copy-btn" onclick="copyText('${accessToken}')">📋 Sao chép</button></div>
                 <div class="tvalue">${accessToken}</div>
             </div>
-
-            <!-- SESSION KEY -->
             <div class="token-card">
-                <div class="tlabel"><span>📦 Session Key (Base64)</span> <button class="copy-btn" onclick="copyText('${sessionKey}')">📋 Sao chép</button></div>
+                <div class="tlabel"><span>📦 Session Key</span> <button class="copy-btn" onclick="copyText('${sessionKey}')">📋 Sao chép</button></div>
                 <div class="tvalue">${sessionKey}</div>
             </div>
-
-            <!-- DECODED SESSION -->
             <div class="token-card">
-                <div class="tlabel"><span>🧩 Giải mã Session Key</span> <button class="copy-btn" onclick="copyText(\`${decodedSession.replace(/`/g, '\\`')}\`)">📋 Sao chép</button></div>
+                <div class="tlabel"><span>🧩 Giải mã Session</span></div>
                 <div class="json-box"><pre>${decodedSession}</pre></div>
             </div>
 
-            <!-- JWT SECTION -->
             <div class="jwt-section">
-                <div style="color:#88bbdd;font-weight:600;font-size:14px;">🔐 JWT Bearer Token (cho API athirdparty)</div>
-                <div style="color:#667799;font-size:11px;margin:4px 0 8px;">Token tự động lấy khi đăng nhập, hoặc nhập thủ công bên dưới</div>
+                <div style="color:#88bbdd;font-weight:600;font-size:14px;">🔐 JWT Bearer Token</div>
+                <div style="color:#667799;font-size:11px;margin:4px 0 8px;">Tự động lấy khi login hoặc nhập thủ công</div>
                 <div class="jwt-row">
                     <input type="text" id="jwtInput" placeholder="Paste JWT here..." value="${jwtToken}" style="flex:1;">
-                    <button class="btn-small green" onclick="saveJwt()">💾 Lưu JWT</button>
+                    <button class="btn-small green" onclick="saveJwt()">💾 Lưu</button>
                     <button class="btn-small" onclick="autoFetchJwt()">🔄 Lấy tự động</button>
                 </div>
-                <div id="jwtStatus" class="jwt-status">${jwtToken ? '✅ Đã có JWT' : '❌ Chưa có JWT, hãy nhập hoặc bấm "Lấy tự động"'}</div>
-                
+                <div id="jwtStatus" class="jwt-status">${jwtToken ? '✅ Đã có JWT' : '❌ Chưa có JWT'}</div>
                 <button class="btn-primary" onclick="fetchJdbAccount()">🚀 LẤY DỮ LIỆU JDB</button>
                 <div id="jdbResult" class="status-msg"></div>
             </div>
@@ -281,8 +294,7 @@ app.get('/dashboard', (req, res) => {
                 <a href="/logout" class="btn" style="background:#3a1a1a;border-color:#663333;color:#ff8888;">🚪 Đăng xuất</a>
                 <a href="/" class="btn">🔄 Trang chủ</a>
             </div>
-
-            <div class="footer-dash">DEEPSEEK ON TOP! 🚀 • Tự động lấy JWT</div>
+            <div class="footer-dash">DEEPSEEK ON TOP! 🚀</div>
         </div>
 
         <script>
@@ -344,7 +356,7 @@ app.get('/dashboard', (req, res) => {
                 const res = await fetch('/api/fetch-jdb', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jwt: jwt })
+                    body: JSON.stringify({ jwt })
                 });
                 const data = await res.json();
                 if (res.ok && data.success) {
@@ -365,7 +377,7 @@ app.get('/dashboard', (req, res) => {
     `);
 });
 
-// ================= API: LƯU JWT THỦ CÔNG =================
+// ================= API: LƯU JWT =================
 app.post('/api/save-jwt', (req, res) => {
     if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
     const { jwt } = req.body;
@@ -377,9 +389,9 @@ app.post('/api/save-jwt', (req, res) => {
 // ================= API: TỰ ĐỘNG LẤY JWT =================
 app.post('/api/fetch-jwt-auto', async (req, res) => {
     if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
-    const { accessToken, sessionKey, username } = req.session.user;
+    const { accessToken, sessionKey } = req.session.user;
     try {
-        const jwt = await fetchJwtFromThirdParty(accessToken, sessionKey, username);
+        const jwt = await fetchJwt(accessToken, sessionKey);
         if (jwt) {
             req.session.user.jwtToken = jwt;
             return res.json({ success: true, jwt });
@@ -398,17 +410,13 @@ app.post('/api/fetch-jdb', async (req, res) => {
     if (!jwt) return res.status(400).json({ success: false, message: 'Thiếu JWT' });
 
     const accessToken = req.session.user.accessToken;
-    if (!accessToken) return res.status(400).json({ success: false, message: 'Thiếu accessToken' });
-
     const url = `https://athirdparty.tele68.com/v1/jdb/account?cp=R&cl=R&pf=web&at=${accessToken}`;
 
     const headers = {
-        ...REQUEST_HEADERS,
+        ...BASE_HEADERS,
         'Host': 'athirdparty.tele68.com',
         'Authorization': `Bearer ${jwt}`,
-        'Content-Type': 'application/json',
-        'sec-ch-ua-platform': '"Android"',
-        'accept': '*/*'
+        'Content-Type': 'application/json'
     };
 
     try {
