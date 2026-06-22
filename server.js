@@ -1,7 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const WebSocket = require('ws');
 
 // ==================== CẤU HÌNH ====================
@@ -26,7 +25,7 @@ let bot = null;
             bot = new TelegramBot(BOT_TOKEN, { polling: true });
             setupBotHandlers();
         } else {
-            console.error('❌ Token không hợp lệ');
+            console.error('❌ Token Telegram không hợp lệ');
         }
     } catch (error) {
         console.error('❌ Không thể kết nối Telegram:', error.message);
@@ -35,7 +34,6 @@ let bot = null;
 
 // ==================== STATE ====================
 const userStates = new Map();
-const wsConnections = new Map();
 
 // ==================== TELEGRAM BOT HANDLERS ====================
 function setupBotHandlers() {
@@ -82,7 +80,8 @@ function setupBotHandlers() {
             betReject: null,
             betTimeout: null,
             reconnectTimer: null,
-            _notifiedBalance: false
+            _notifiedBalance: false,
+            reconnectAttempts: 0
         };
 
         userStates.set(chatId, newState);
@@ -262,13 +261,7 @@ function connectWebSocket(chatId) {
             console.log('✅ WebSocket đã kết nối cho ' + chatId);
             const authMsg = '40/txmd5,{"token":"' + state.jwtToken + '"}';
             ws.send(authMsg);
-            console.log('📤 Đã gửi auth');
-
-            setTimeout(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send('42/txmd5,{"session-info":{"id":0}}');
-                }
-            }, 1000);
+            console.log('📤 Đã gửi auth: ' + authMsg.substring(0, 100) + '...');
         });
 
         ws.on('message', (data) => {
@@ -287,6 +280,16 @@ function connectWebSocket(chatId) {
                 st.ws = null;
                 st.wsReady = false;
                 userStates.set(chatId, st);
+                // Nếu code = 1005 hoặc 1006, có thể token sai
+                if (code === 1005 || code === 1006) {
+                    if (bot) {
+                        bot.sendMessage(chatId, '❌ Token không hợp lệ hoặc WebSocket bị từ chối. Vui lòng kiểm tra token và thử lại.');
+                    }
+                } else {
+                    if (bot) {
+                        bot.sendMessage(chatId, '⚠️ Mất kết nối WebSocket (code: ' + code + '). Đang thử lại...');
+                    }
+                }
                 if (st.isLoggedIn && !st.reconnectTimer) {
                     console.log('🔄 Thử reconnect cho ' + chatId + ' sau 3s...');
                     st.reconnectTimer = setTimeout(() => {
@@ -758,7 +761,6 @@ app.get('/', (req, res) => {
 
     <script>
         var selectedBet = null;
-        var ws = null;
         var isConnected = false;
         var sessionId = null;
 
@@ -946,17 +948,17 @@ app.post('/api/connect', (req, res) => {
         betReject: null,
         betTimeout: null,
         reconnectTimer: null,
-        _notifiedBalance: false
+        _notifiedBalance: false,
+        reconnectAttempts: 0
     };
     
     userStates.set(sessionId, state);
-    wsConnections.set(sessionId, { state: state });
     
     connectWebSocket(sessionId);
     
     setTimeout(function() {
         var st = userStates.get(sessionId);
-        if (st) {
+        if (st && st.wsReady) {
             res.json({ 
                 success: true, 
                 sessionId: sessionId, 
@@ -964,9 +966,9 @@ app.post('/api/connect', (req, res) => {
                 nickname: st.nickname || 'Unknown'
             });
         } else {
-            res.json({ success: false, message: 'Không thể kết nối' });
+            res.json({ success: false, message: 'Không thể kết nối WebSocket. Kiểm tra token.' });
         }
-    }, 2000);
+    }, 3000);
 });
 
 app.get('/api/ws-events', (req, res) => {
