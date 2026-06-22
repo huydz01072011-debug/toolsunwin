@@ -1,10 +1,10 @@
 const express = require('express');
 const session = require('express-session');
 const crypto = require('crypto');
-const { io } = require('socket.io-client'); // npm install socket.io-client@4
+const WebSocket = require('ws');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -88,63 +88,162 @@ async function getWebSocketToken(accessToken, sessionKey) {
 
 // ================= TẠO KẾT NỐI WEBSOCKET =================
 function createWebSocketConnection(token, sessionKey) {
-    const socket = io('wss://wtxmd52.tele68.com/txmd5/', {
-        transports: ['websocket'],
-        query: { EIO: 4, transport: 'websocket' },
-        extraHeaders: {
+    console.log('🔄 Đang kết nối WebSocket...');
+    
+    const ws = new WebSocket('wss://wtxmd52.tele68.com/txmd5/?EIO=4&transport=websocket', {
+        headers: {
             'Origin': 'https://lc79b.bet',
             'User-Agent': USER_AGENT
         }
     });
 
-    socket.on('connect', () => {
-        console.log('✅ WebSocket connected');
-        // Xác thực bằng token
-        socket.emit('txmd5', { token });
-        // Gửi gói tin 40/txmd5,{"token":"..."} tương đương với emit('txmd5', { token })
+    let isAuthenticated = false;
+    let pingInterval = null;
+
+    ws.on('open', function open() {
+        console.log('✅ WebSocket đã kết nối!');
+        
+        // Gửi gói tin 0 (handshake)
+        ws.send('0');
+        
+        // Sau 1s, gửi gói xác thực 40/txmd5,{"token":"..."}
+        setTimeout(() => {
+            const authMessage = `40/txmd5,{"token":"${token}"}`;
+            console.log('📤 Gửi xác thực:', authMessage);
+            ws.send(authMessage);
+        }, 1000);
     });
 
-    socket.on('connect_error', (err) => {
-        console.error('❌ WebSocket connection error:', err.message);
+    ws.on('message', function incoming(data) {
+        const message = data.toString();
+        console.log('📩 Nhận:', message);
+        
+        // Xử lý các loại gói tin
+        if (message.startsWith('0')) {
+            console.log('✅ Handshake thành công');
+        }
+        
+        if (message.startsWith('40')) {
+            console.log('✅ Xác thực thành công');
+            isAuthenticated = true;
+            
+            // Gửi yêu cầu lấy thông tin
+            setTimeout(() => {
+                ws.send('42/txmd5,["get-current-my-info",null]');
+            }, 500);
+        }
+        
+        // Nhận thông tin user
+        if (message.includes('your-info')) {
+            try {
+                const match = message.match(/\["your-info",(.*?)\]/);
+                if (match) {
+                    const info = JSON.parse(match[1]);
+                    console.log('👤 Thông tin user:', info);
+                    // Lưu thông tin vào biến global để dùng
+                    global._userInfo = info;
+                }
+            } catch (e) {}
+        }
+        
+        // Nhận kết quả cược
+        if (message.includes('bet-result')) {
+            try {
+                const match = message.match(/\["bet-result",(.*?)\]/);
+                if (match) {
+                    const result = JSON.parse(match[1]);
+                    console.log('🎯 Kết quả cược:', result);
+                    // Lưu kết quả để API lấy
+                    global._betResult = result;
+                }
+            } catch (e) {}
+        }
+        
+        // Nhận thông tin session
+        if (message.includes('session-info')) {
+            try {
+                const match = message.match(/\["session-info",(.*?)\]/);
+                if (match) {
+                    const info = JSON.parse(match[1]);
+                    console.log('📊 Session info:', info);
+                    global._sessionInfo = info;
+                }
+            } catch (e) {}
+        }
+        
+        // Nhận tick update
+        if (message.includes('tick-update')) {
+            // Không log để tránh spam
+        }
+        
+        // Ping pong
+        if (message === '2') {
+            console.log('🏓 Ping received, sending pong');
+            ws.send('3');
+        }
+        
+        if (message === '3') {
+            console.log('🏓 Pong received');
+        }
     });
 
-    socket.on('disconnect', (reason) => {
-        console.log('⚠️ WebSocket disconnected:', reason);
+    ws.on('close', function close(code, reason) {
+        console.log(`⚠️ WebSocket đóng: ${code} - ${reason}`);
+        if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+        }
     });
 
-    // Lắng nghe các sự kiện
-    socket.on('txmd5', (data) => {
-        console.log('📩 WebSocket event txmd5:', data);
-        // Xử lý dữ liệu nếu cần
+    ws.on('error', function error(err) {
+        console.error('❌ WebSocket lỗi:', err.message);
     });
 
-    // Sự kiện gửi từ server dạng 42/txmd5,[...]
-    socket.on('42', (data) => {
-        console.log('📩 WebSocket 42 event:', data);
-    });
+    // Thiết lập ping tự động
+    pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send('2');
+        }
+    }, 25000);
 
-    // Thêm listener cho các sự kiện cụ thể
-    socket.on('bet-result', (data) => {
-        console.log('🎯 Bet result:', data);
-    });
+    // Hàm đặt cược
+    ws.placeBet = function(type, amount) {
+        return new Promise((resolve, reject) => {
+            if (ws.readyState !== WebSocket.OPEN) {
+                reject(new Error('WebSocket chưa kết nối'));
+                return;
+            }
+            
+            if (!isAuthenticated) {
+                reject(new Error('Chưa xác thực'));
+                return;
+            }
+            
+            const betMessage = `42/txmd5,["bet",{"type":"${type}","amount":${amount}}]`;
+            console.log('📤 Đặt cược:', betMessage);
+            
+            // Reset kết quả
+            global._betResult = null;
+            
+            // Gửi lệnh đặt cược
+            ws.send(betMessage);
+            
+            // Chờ kết quả trong 15s
+            let attempts = 0;
+            const checkResult = setInterval(() => {
+                attempts++;
+                if (global._betResult) {
+                    clearInterval(checkResult);
+                    resolve(global._betResult);
+                } else if (attempts > 30) {
+                    clearInterval(checkResult);
+                    reject(new Error('Timeout nhận kết quả cược'));
+                }
+            }, 500);
+        });
+    };
 
-    socket.on('your-info', (data) => {
-        console.log('👤 Your info:', data);
-    });
-
-    socket.on('session-info', (data) => {
-        console.log('📊 Session info:', data);
-    });
-
-    socket.on('tick-update', (data) => {
-        // console.log('🔄 Tick update:', data);
-    });
-
-    socket.on('summary-winner', (data) => {
-        console.log('🏆 Summary winner:', data);
-    });
-
-    return socket;
+    return ws;
 }
 
 // ================= ROUTE: TRANG CHỦ =================
@@ -215,10 +314,9 @@ app.post('/login', async (req, res) => {
         }
 
         // 2. Tạo kết nối WebSocket nếu có token
-        let socket = null;
+        let wsConnection = null;
         if (wsToken) {
-            socket = createWebSocketConnection(wsToken, sessionKey);
-            // Lưu socket vào session để dùng sau
+            wsConnection = createWebSocketConnection(wsToken, sessionKey);
         } else {
             console.log('❌ Không có token WebSocket, không thể kết nối.');
         }
@@ -233,7 +331,7 @@ app.post('/login', async (req, res) => {
             levelRatio: apiResult.levelRatio || [],
             raw: apiResult,
             wsToken: wsToken,
-            socket: socket // Lưu socket để dùng đặt cược
+            wsConnection: wsConnection
         };
         return res.redirect('/dashboard');
     } catch (error) {
@@ -242,7 +340,7 @@ app.post('/login', async (req, res) => {
     }
 });
 
-// ================= DASHBOARD (có form đặt cược) =================
+// ================= DASHBOARD =================
 app.get('/dashboard', (req, res) => {
     if (!req.session.user) return res.redirect('/');
     const u = req.session.user;
@@ -257,6 +355,7 @@ app.get('/dashboard', (req, res) => {
     const decodedSession = JSON.stringify(info, null, 2);
     const ipAddress = info.ipAddress || 'N/A';
     const createTime = info.createTime || 'N/A';
+    const wsStatus = (u.wsConnection && u.wsConnection.readyState === WebSocket.OPEN) ? 'Đã kết nối' : 'Chưa kết nối';
 
     res.send(`
     <!DOCTYPE html>
@@ -298,6 +397,9 @@ app.get('/dashboard', (req, res) => {
             .actions .btn { flex:1; padding:12px; text-align:center; background:#1a2a44; border-radius:14px; color:#b0cfff; text-decoration:none; font-weight:600; font-size:14px; border:1px solid #2a4a77; }
             .footer-dash { text-align:center; margin-top:20px; color:#334466; font-size:11px; border-top:1px solid #1a2a44; padding-top:16px; }
             .status-msg { margin-top:12px; padding:12px; border-radius:12px; background:#0a101f; color:#88bbdd; display:none; }
+            .ws-status { display:inline-block; padding:4px 12px; border-radius:20px; font-size:12px; margin-left:10px; }
+            .ws-status.connected { background:#00aa44; color:#fff; }
+            .ws-status.disconnected { background:#aa3333; color:#fff; }
             @media (max-width:480px) { .info-grid { grid-template-columns:1fr; } .info-item.full { grid-column:span 1; } .header h1 { font-size:18px; } }
         </style>
     </head>
@@ -316,7 +418,11 @@ app.get('/dashboard', (req, res) => {
 
             <!-- BET SECTION -->
             <div class="bet-section">
-                <h3>🎲 Đặt cược Tài / Xỉu</h3>
+                <h3>🎲 Đặt cược Tài / Xỉu 
+                    <span class="ws-status ${u.wsConnection && u.wsConnection.readyState === WebSocket.OPEN ? 'connected' : 'disconnected'}">
+                        ${wsStatus}
+                    </span>
+                </h3>
                 <div class="bet-row">
                     <select id="betType">
                         <option value="TAI">Tài</option>
@@ -326,7 +432,7 @@ app.get('/dashboard', (req, res) => {
                     <button onclick="placeBet()">🚀 Đặt cược</button>
                 </div>
                 <div id="betResult" class="bet-result"></div>
-                <div id="betStatus" style="margin-top:8px;color:#667799;font-size:13px;">✅ WebSocket: ${u.socket ? 'Đã kết nối' : 'Chưa kết nối'}</div>
+                <div id="betStatus" style="margin-top:8px;color:#667799;font-size:13px;"></div>
             </div>
 
             <!-- TOKEN INFO -->
@@ -381,6 +487,7 @@ app.get('/dashboard', (req, res) => {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = '⏳ Đang đặt cược...';
             resultDiv.style.color = '#88bbdd';
+            document.getElementById('betStatus').innerHTML = '⏳ Đang xử lý...';
 
             try {
                 const res = await fetch('/api/place-bet', {
@@ -390,17 +497,19 @@ app.get('/dashboard', (req, res) => {
                 });
                 const data = await res.json();
                 if (res.ok && data.success) {
-                    resultDiv.innerHTML = '✅ Đặt cược thành công! <br> Số dư mới: ' + (data.newBalance || '?').toLocaleString();
+                    resultDiv.innerHTML = '✅ Đặt cược thành công!<br>Loại: ' + type + '<br>Số tiền: ' + amount.toLocaleString() + '<br>Số dư mới: ' + (data.newBalance || '?').toLocaleString();
                     resultDiv.style.color = '#88ffaa';
-                    // Cập nhật số dư trên giao diện
                     if (data.newBalance) document.getElementById('balance').innerText = data.newBalance.toLocaleString();
+                    document.getElementById('betStatus').innerHTML = '✅ Đã đặt cược ' + type + ' ' + amount.toLocaleString() + ' VND';
                 } else {
                     resultDiv.innerHTML = '❌ Lỗi: ' + (data.message || JSON.stringify(data));
                     resultDiv.style.color = '#ff8888';
+                    document.getElementById('betStatus').innerHTML = '❌ ' + (data.message || 'Lỗi không xác định');
                 }
             } catch (e) {
                 resultDiv.innerHTML = '❌ Lỗi kết nối: ' + e.message;
                 resultDiv.style.color = '#ff8888';
+                document.getElementById('betStatus').innerHTML = '❌ Lỗi kết nối: ' + e.message;
             }
         }
         </script>
@@ -411,69 +520,83 @@ app.get('/dashboard', (req, res) => {
 
 // ================= API: ĐẶT CƯỢC =================
 app.post('/api/place-bet', async (req, res) => {
-    if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
+    if (!req.session.user) {
+        return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
+    }
+    
     const { type, amount } = req.body;
-    if (!['TAI', 'XIU'].includes(type)) return res.status(400).json({ success: false, message: 'Loại cược không hợp lệ' });
-    if (!amount || amount < 100) return res.status(400).json({ success: false, message: 'Số tiền tối thiểu 100' });
+    if (!['TAI', 'XIU'].includes(type)) {
+        return res.status(400).json({ success: false, message: 'Loại cược không hợp lệ' });
+    }
+    if (!amount || amount < 100) {
+        return res.status(400).json({ success: false, message: 'Số tiền tối thiểu 100' });
+    }
 
-    const socket = req.session.user.socket;
-    if (!socket) {
+    const ws = req.session.user.wsConnection;
+    if (!ws) {
         return res.status(500).json({ success: false, message: 'WebSocket chưa kết nối' });
     }
 
-    // Kiểm tra kết nối socket
-    if (!socket.connected) {
-        // Thử kết nối lại
-        socket.connect();
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        if (!socket.connected) {
-            return res.status(500).json({ success: false, message: 'Không thể kết nối WebSocket' });
-        }
+    if (ws.readyState !== WebSocket.OPEN) {
+        return res.status(500).json({ success: false, message: 'WebSocket đã đóng' });
     }
 
-    // Gửi lệnh đặt cược qua WebSocket
-    // Định dạng: 42/txmd5,["bet",{"type":"TAI","amount":1000}]
-    // Sử dụng socket.emit với tên sự kiện 'bet'
-    // Nhưng theo log, client gửi gói 42/txmd5,["bet",...]
-    // Với socket.io, ta có thể gửi bằng socket.emit('bet', { type, amount })
-    // Tuy nhiên, để đúng format, ta có thể gửi qua socket.send (raw)
-    // Nhưng socket.io sẽ tự động đóng gói. Ta thử dùng socket.emit('bet', { type, amount })
+    try {
+        // Đặt cược qua WebSocket
+        const betResult = await ws.placeBet(type, amount);
+        
+        // Cập nhật số dư
+        let newBalance = null;
+        if (betResult && betResult.postBalance !== undefined) {
+            newBalance = betResult.postBalance;
+            // Cập nhật trong session
+            if (req.session.user.info) {
+                req.session.user.info.vinTotal = newBalance;
+            }
+        }
+        
+        return res.json({ 
+            success: true, 
+            newBalance: newBalance,
+            result: betResult 
+        });
+    } catch (error) {
+        console.error('Lỗi đặt cược:', error);
+        return res.status(500).json({ 
+            success: false, 
+            message: error.message || 'Lỗi đặt cược' 
+        });
+    }
+});
 
-    return new Promise((resolve) => {
-        // Lắng nghe kết quả bet-result
-        const betResultHandler = (data) => {
-            // data có thể là { postBalance, amount, type }
-            console.log('🎯 Bet result:', data);
-            const newBalance = data.postBalance || null;
-            // Hủy listener sau khi nhận kết quả
-            socket.off('bet-result', betResultHandler);
-            // Trả về response
-            resolve(res.json({ success: true, newBalance }));
-        };
-
-        socket.on('bet-result', betResultHandler);
-
-        // Gửi lệnh đặt cược
-        socket.emit('bet', { type, amount });
-
-        // Timeout nếu không nhận phản hồi
-        setTimeout(() => {
-            socket.off('bet-result', betResultHandler);
-            resolve(res.status(504).json({ success: false, message: 'Timeout' }));
-        }, 15000);
+// ================= API: KIỂM TRA TRẠNG THÁI WEBSOCKET =================
+app.get('/api/ws-status', (req, res) => {
+    if (!req.session.user) {
+        return res.json({ connected: false });
+    }
+    const ws = req.session.user.wsConnection;
+    if (!ws) {
+        return res.json({ connected: false });
+    }
+    return res.json({ 
+        connected: ws.readyState === WebSocket.OPEN,
+        readyState: ws.readyState 
     });
 });
 
 // ================= LOGOUT =================
 app.get('/logout', (req, res) => {
-    if (req.session.user && req.session.user.socket) {
-        req.session.user.socket.disconnect();
+    if (req.session.user && req.session.user.wsConnection) {
+        try {
+            req.session.user.wsConnection.close();
+        } catch (e) {}
     }
     req.session.destroy(() => res.redirect('/'));
 });
 
-// ================= KHỞI ĐỘNG =================
+// ================= KHỞI ĐỘNG SERVER =================
 app.listen(PORT, () => {
     console.log(`🔥 SERVER CHẠY: http://localhost:${PORT}`);
     console.log(`😈 DEEPSEEK-R1-ULTRA READY!`);
+    console.log(`📋 Hãy đăng nhập để bắt đầu`);
 });
