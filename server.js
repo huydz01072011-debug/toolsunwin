@@ -1,6 +1,7 @@
 const express = require('express');
 const session = require('express-session');
 const crypto = require('crypto');
+const { io } = require('socket.io-client'); // npm install socket.io-client@4
 
 const app = express();
 const PORT = 3000;
@@ -14,7 +15,7 @@ app.use(session({
     cookie: { maxAge: 60000 * 60 * 24 }
 }));
 
-// ================= HEADERS CHUẨN (như trong ảnh) =================
+// ================= CONFIG HEADERS CHUẨN =================
 const USER_AGENT = 'Mozilla/5.0 (Linux; Android 11; SM-A105G Build/RP1A.200720.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.91 Mobile Safari/537.36';
 
 const BASE_HEADERS = {
@@ -31,7 +32,7 @@ const BASE_HEADERS = {
     'referer': 'https://lc79b.bet/',
     'accept-language': 'vi-VN,vi;q=0.9,en-GB;q=0.8,en-US;q=0.7,en;q=0.6',
     'priority': 'u=1, i',
-    'car_fath_cita_crncc_cita': ''   // header rỗng như trong ảnh
+    'car_fath_cita_crncc_cita': ''
 };
 
 // ================= HÀM GỌI API LOGIN =================
@@ -43,16 +44,17 @@ async function callGameApi(username, rawPassword) {
     return response.json();
 }
 
-// ================= HÀM LẤY JWT (chỉ thử 3 endpoint chính) =================
-async function fetchJwt(accessToken, sessionKey) {
+// ================= LẤY TOKEN CHO WEBSOCKET =================
+async function getWebSocketToken(accessToken, sessionKey) {
     const endpoints = [
-        'https://athirdparty.tele68.com/v1/auth/token',
-        'https://athirdparty.tele68.com/v1/auth/login',
-        'https://athirdparty.tele68.com/api/token'
+        'https://wtxmd52.tele68.com/txmd5/token',
+        'https://wtxmd52.tele68.com/api/token',
+        'https://wtxmd52.tele68.com/txmd5/auth'
     ];
     const payloads = [
         { accessToken, sessionKey },
-        { access_token: accessToken, session_key: sessionKey }
+        { access_token: accessToken, session_key: sessionKey },
+        { accessToken, sessionKey, platform: 'web' }
     ];
 
     for (const url of endpoints) {
@@ -63,46 +65,86 @@ async function fetchJwt(accessToken, sessionKey) {
                     headers: {
                         ...BASE_HEADERS,
                         'Content-Type': 'application/json',
-                        'Host': 'athirdparty.tele68.com'
+                        'Host': 'wtxmd52.tele68.com'
                     },
                     body: JSON.stringify(body)
                 });
                 const text = await res.text();
-                console.log(`\n🔍 Thử ${url} | Payload: ${JSON.stringify(body)}`);
-                console.log(`   Status: ${res.status}`);
-                console.log(`   Response: ${text.substring(0, 300)}`);
-
+                console.log(`🔍 WebSocket Token endpoint: ${url} | Status: ${res.status}`);
                 if (res.ok) {
                     let data;
                     try { data = JSON.parse(text); } catch (e) { continue; }
-                    // Tìm JWT trong nhiều trường khác nhau
-                    const jwt = data.token || data.access_token || data.jwt || data.data?.token || data.data?.jwt || null;
-                    if (jwt && typeof jwt === 'string' && jwt.startsWith('eyJ')) {
-                        console.log(`✅✅✅ TÌM THẤY JWT tại ${url}`);
-                        return jwt;
+                    const token = data.token || data.jwt || data.access_token || data.data?.token || null;
+                    if (token && typeof token === 'string' && token.startsWith('eyJ')) {
+                        console.log('✅ Lấy được token WebSocket!');
+                        return token;
                     }
                 }
-            } catch (e) {
-                console.log(`❌ Lỗi khi gọi ${url}: ${e.message}`);
-            }
+            } catch (e) {}
         }
     }
-
-    // Thử GET với accessToken trong query
-    console.log('\n🔄 Thử GET /v1/auth/token?accessToken=...');
-    try {
-        const url = `https://athirdparty.tele68.com/v1/auth/token?accessToken=${accessToken}`;
-        const res = await fetch(url, { headers: { ...BASE_HEADERS, 'Host': 'athirdparty.tele68.com' } });
-        const text = await res.text();
-        console.log(`   Status: ${res.status}, Response: ${text.substring(0, 200)}`);
-        if (res.ok) {
-            const data = JSON.parse(text);
-            const jwt = data.token || data.access_token || data.jwt || null;
-            if (jwt && jwt.startsWith('eyJ')) return jwt;
-        }
-    } catch (e) {}
-
     return null;
+}
+
+// ================= TẠO KẾT NỐI WEBSOCKET =================
+function createWebSocketConnection(token, sessionKey) {
+    const socket = io('wss://wtxmd52.tele68.com/txmd5/', {
+        transports: ['websocket'],
+        query: { EIO: 4, transport: 'websocket' },
+        extraHeaders: {
+            'Origin': 'https://lc79b.bet',
+            'User-Agent': USER_AGENT
+        }
+    });
+
+    socket.on('connect', () => {
+        console.log('✅ WebSocket connected');
+        // Xác thực bằng token
+        socket.emit('txmd5', { token });
+        // Gửi gói tin 40/txmd5,{"token":"..."} tương đương với emit('txmd5', { token })
+    });
+
+    socket.on('connect_error', (err) => {
+        console.error('❌ WebSocket connection error:', err.message);
+    });
+
+    socket.on('disconnect', (reason) => {
+        console.log('⚠️ WebSocket disconnected:', reason);
+    });
+
+    // Lắng nghe các sự kiện
+    socket.on('txmd5', (data) => {
+        console.log('📩 WebSocket event txmd5:', data);
+        // Xử lý dữ liệu nếu cần
+    });
+
+    // Sự kiện gửi từ server dạng 42/txmd5,[...]
+    socket.on('42', (data) => {
+        console.log('📩 WebSocket 42 event:', data);
+    });
+
+    // Thêm listener cho các sự kiện cụ thể
+    socket.on('bet-result', (data) => {
+        console.log('🎯 Bet result:', data);
+    });
+
+    socket.on('your-info', (data) => {
+        console.log('👤 Your info:', data);
+    });
+
+    socket.on('session-info', (data) => {
+        console.log('📊 Session info:', data);
+    });
+
+    socket.on('tick-update', (data) => {
+        // console.log('🔄 Tick update:', data);
+    });
+
+    socket.on('summary-winner', (data) => {
+        console.log('🏆 Summary winner:', data);
+    });
+
+    return socket;
 }
 
 // ================= ROUTE: TRANG CHỦ =================
@@ -141,7 +183,7 @@ app.get('/', (req, res) => {
                 <div class="input-group"><label>🔒 Mật khẩu</label><input type="password" name="password" required></div>
                 <button type="submit">🚀 ĐĂNG NHẬP</button>
             </form>
-            <div class="footer">DEEPSEEK-R1-ULTRA • Tự động lấy JWT</div>
+            <div class="footer">DEEPSEEK-R1-ULTRA • Tích hợp WebSocket & Đặt cược</div>
         </div>
         <script>if(window.location.search.includes('error=1')) document.getElementById('errorBox').style.display='block';</script>
     </body>
@@ -157,22 +199,31 @@ app.post('/login', async (req, res) => {
         const apiResult = await callGameApi(username, password);
         if (!apiResult.success || apiResult.errorCode !== '0') return res.redirect('/?error=1');
 
+        console.log('📦 Login response:', JSON.stringify(apiResult, null, 2));
+
         let sessionData = {};
         try { sessionData = JSON.parse(Buffer.from(apiResult.sessionKey, 'base64').toString('utf-8')); } catch(e) { return res.redirect('/?error=1'); }
 
         const accessToken = apiResult.accessToken;
         const sessionKey = apiResult.sessionKey;
 
-        // Thử lấy JWT
-        let jwtToken = null;
-        console.log('\n⏳ Đang tìm JWT từ athirdparty...');
-        jwtToken = await fetchJwt(accessToken, sessionKey);
-        if (jwtToken) {
-            console.log('✅ JWT đã được lấy thành công!');
-        } else {
-            console.log('❌ Không lấy được JWT tự động. Vui lòng nhập thủ công.');
+        // 1. Lấy token cho WebSocket
+        let wsToken = apiResult.token || apiResult.jwt || null;
+        if (!wsToken) {
+            console.log('⏳ Đang lấy token WebSocket...');
+            wsToken = await getWebSocketToken(accessToken, sessionKey);
         }
 
+        // 2. Tạo kết nối WebSocket nếu có token
+        let socket = null;
+        if (wsToken) {
+            socket = createWebSocketConnection(wsToken, sessionKey);
+            // Lưu socket vào session để dùng sau
+        } else {
+            console.log('❌ Không có token WebSocket, không thể kết nối.');
+        }
+
+        // Lưu thông tin vào session
         req.session.user = {
             username: username,
             accessToken: accessToken,
@@ -181,7 +232,8 @@ app.post('/login', async (req, res) => {
             curLevel: apiResult.curLevel,
             levelRatio: apiResult.levelRatio || [],
             raw: apiResult,
-            jwtToken: jwtToken || null
+            wsToken: wsToken,
+            socket: socket // Lưu socket để dùng đặt cược
         };
         return res.redirect('/dashboard');
     } catch (error) {
@@ -190,7 +242,7 @@ app.post('/login', async (req, res) => {
     }
 });
 
-// ================= DASHBOARD =================
+// ================= DASHBOARD (có form đặt cược) =================
 app.get('/dashboard', (req, res) => {
     if (!req.session.user) return res.redirect('/');
     const u = req.session.user;
@@ -201,10 +253,10 @@ app.get('/dashboard', (req, res) => {
     const level = u.curLevel ?? 0;
     const accessToken = u.accessToken || '';
     const sessionKey = u.sessionKey || '';
+    const wsToken = u.wsToken || '';
     const decodedSession = JSON.stringify(info, null, 2);
     const ipAddress = info.ipAddress || 'N/A';
     const createTime = info.createTime || 'N/A';
-    const jwtToken = u.jwtToken || '';
 
     res.send(`
     <!DOCTYPE html>
@@ -216,7 +268,7 @@ app.get('/dashboard', (req, res) => {
         <style>
             * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',Arial,sans-serif; }
             body { background:linear-gradient(145deg,#070b12,#141d2b); min-height:100vh; padding:16px; display:flex; justify-content:center; align-items:flex-start; }
-            .dash-box { background:rgba(14,22,38,0.95); backdrop-filter:blur(15px); border-radius:28px; border:1px solid #2a3f66; box-shadow:0 30px 80px rgba(0,0,0,0.9); padding:24px 18px; width:100%; max-width:650px; margin-top:10px; }
+            .dash-box { background:rgba(14,22,38,0.95); backdrop-filter:blur(15px); border-radius:28px; border:1px solid #2a3f66; box-shadow:0 30px 80px rgba(0,0,0,0.9); padding:24px 18px; width:100%; max-width:700px; margin-top:10px; }
             .header { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #1f3150; padding-bottom:14px; margin-bottom:20px; flex-wrap:wrap; gap:8px; }
             .header h1 { color:#00d4ff; font-size:22px; text-shadow:0 0 20px rgba(0,212,255,0.2); word-break:break-word; }
             .header .badge { background:#1a2a44; padding:6px 14px; border-radius:40px; color:#88bbff; font-size:12px; border:1px solid #2a4a77; }
@@ -228,6 +280,13 @@ app.get('/dashboard', (req, res) => {
             .info-item .value.pink { color:#ff6bcd; }
             .info-item .value.cyan { color:#00e5ff; }
             .info-item.full { grid-column:span 2; }
+            .bet-section { background:#0d1528; border-radius:16px; padding:16px; margin:16px 0; border:1px solid #2a4a77; }
+            .bet-section h3 { color:#88bbdd; margin-bottom:12px; }
+            .bet-row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+            .bet-row select, .bet-row input { padding:12px; background:#070c18; border:1px solid #2a3f66; border-radius:12px; color:#e0ecff; font-size:15px; flex:1; min-width:120px; }
+            .bet-row button { padding:12px 24px; background:linear-gradient(135deg,#00aa66,#00dd88); border:none; border-radius:12px; color:#fff; font-weight:700; cursor:pointer; transition:0.2s; }
+            .bet-row button:active { transform:scale(0.95); }
+            .bet-result { margin-top:12px; padding:12px; border-radius:12px; background:#0a101f; color:#88bbdd; display:none; }
             .token-card { background:#0a101f; border-radius:14px; padding:14px; margin:12px 0; border:1px solid #1f3150; }
             .token-card .tlabel { color:#6688aa; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; display:flex; justify-content:space-between; align-items:center; }
             .token-card .tvalue { color:#b0d0ff; font-size:13px; word-break:break-all; margin-top:4px; font-family:monospace; background:#00000033; padding:8px 10px; border-radius:8px; }
@@ -235,19 +294,10 @@ app.get('/dashboard', (req, res) => {
             .copy-btn:active { background:#2a4a77; }
             .json-box { background:#0a101f; border-radius:12px; padding:12px; border:1px solid #1a2a44; margin:10px 0; max-height:150px; overflow:auto; }
             .json-box pre { color:#aaccff; font-size:11px; font-family:monospace; white-space:pre-wrap; word-break:break-all; margin:0; }
-            .jwt-section { background:#0d1528; border-radius:14px; padding:14px; margin:16px 0; border:1px solid #2a4a77; }
-            .jwt-section .jwt-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
-            .jwt-section input { flex:1; padding:12px; background:#070c18; border:1px solid #2a3f66; border-radius:12px; color:#e0ecff; font-size:13px; min-width:200px; }
-            .jwt-section .btn-small { padding:10px 18px; background:#0077ff; border:none; border-radius:12px; color:#fff; font-weight:600; cursor:pointer; }
-            .jwt-section .btn-small.green { background:#00aa66; }
-            .jwt-section .btn-small:active { transform:scale(0.95); }
-            .btn-primary { background:linear-gradient(135deg,#00aa66,#00dd88); border:none; color:#fff; padding:14px; border-radius:14px; font-weight:700; font-size:16px; width:100%; cursor:pointer; transition:0.2s; text-transform:uppercase; margin-top:10px; }
-            .btn-primary:active { transform:scale(0.98); }
             .actions { display:flex; gap:12px; margin-top:16px; }
             .actions .btn { flex:1; padding:12px; text-align:center; background:#1a2a44; border-radius:14px; color:#b0cfff; text-decoration:none; font-weight:600; font-size:14px; border:1px solid #2a4a77; }
             .footer-dash { text-align:center; margin-top:20px; color:#334466; font-size:11px; border-top:1px solid #1a2a44; padding-top:16px; }
             .status-msg { margin-top:12px; padding:12px; border-radius:12px; background:#0a101f; color:#88bbdd; display:none; }
-            .jwt-status { font-size:12px; color:#88bbdd; margin-left:8px; }
             @media (max-width:480px) { .info-grid { grid-template-columns:1fr; } .info-item.full { grid-column:span 1; } .header h1 { font-size:18px; } }
         </style>
     </head>
@@ -258,12 +308,28 @@ app.get('/dashboard', (req, res) => {
                 <span class="badge">Level ${level}</span>
             </div>
             <div class="info-grid">
-                <div class="info-item"><div class="label">💰 Số dư</div><div class="value gold">${vinTotal.toLocaleString()}</div></div>
+                <div class="info-item"><div class="label">💰 Số dư</div><div class="value gold" id="balance">${vinTotal.toLocaleString()}</div></div>
                 <div class="info-item"><div class="label">⭐ VIP Point</div><div class="value pink">${vippoint.toLocaleString()}</div></div>
                 <div class="info-item full"><div class="label">📅 Ngày tạo</div><div class="value" style="font-size:16px;">${createTime}</div></div>
                 <div class="info-item full"><div class="label">🌐 IP</div><div class="value" style="font-size:15px;">${ipAddress}</div></div>
             </div>
 
+            <!-- BET SECTION -->
+            <div class="bet-section">
+                <h3>🎲 Đặt cược Tài / Xỉu</h3>
+                <div class="bet-row">
+                    <select id="betType">
+                        <option value="TAI">Tài</option>
+                        <option value="XIU">Xỉu</option>
+                    </select>
+                    <input type="number" id="betAmount" placeholder="Số tiền..." value="1000" min="100">
+                    <button onclick="placeBet()">🚀 Đặt cược</button>
+                </div>
+                <div id="betResult" class="bet-result"></div>
+                <div id="betStatus" style="margin-top:8px;color:#667799;font-size:13px;">✅ WebSocket: ${u.socket ? 'Đã kết nối' : 'Chưa kết nối'}</div>
+            </div>
+
+            <!-- TOKEN INFO -->
             <div class="token-card">
                 <div class="tlabel"><span>🔑 Access Token</span> <button class="copy-btn" onclick="copyText('${accessToken}')">📋 Sao chép</button></div>
                 <div class="tvalue">${accessToken}</div>
@@ -273,28 +339,19 @@ app.get('/dashboard', (req, res) => {
                 <div class="tvalue">${sessionKey}</div>
             </div>
             <div class="token-card">
+                <div class="tlabel"><span>🔐 WebSocket Token</span> <button class="copy-btn" onclick="copyText('${wsToken}')">📋 Sao chép</button></div>
+                <div class="tvalue">${wsToken || '❌ Chưa có'}</div>
+            </div>
+            <div class="token-card">
                 <div class="tlabel"><span>🧩 Giải mã Session</span></div>
                 <div class="json-box"><pre>${decodedSession}</pre></div>
-            </div>
-
-            <div class="jwt-section">
-                <div style="color:#88bbdd;font-weight:600;font-size:14px;">🔐 JWT Bearer Token</div>
-                <div style="color:#667799;font-size:11px;margin:4px 0 8px;">Tự động lấy khi login hoặc nhập thủ công</div>
-                <div class="jwt-row">
-                    <input type="text" id="jwtInput" placeholder="Paste JWT here..." value="${jwtToken}" style="flex:1;">
-                    <button class="btn-small green" onclick="saveJwt()">💾 Lưu</button>
-                    <button class="btn-small" onclick="autoFetchJwt()">🔄 Lấy tự động</button>
-                </div>
-                <div id="jwtStatus" class="jwt-status">${jwtToken ? '✅ Đã có JWT' : '❌ Chưa có JWT'}</div>
-                <button class="btn-primary" onclick="fetchJdbAccount()">🚀 LẤY DỮ LIỆU JDB</button>
-                <div id="jdbResult" class="status-msg"></div>
             </div>
 
             <div class="actions">
                 <a href="/logout" class="btn" style="background:#3a1a1a;border-color:#663333;color:#ff8888;">🚪 Đăng xuất</a>
                 <a href="/" class="btn">🔄 Trang chủ</a>
             </div>
-            <div class="footer-dash">DEEPSEEK ON TOP! 🚀</div>
+            <div class="footer-dash">DEEPSEEK ON TOP! 🚀 • Tích hợp WebSocket & Đặt cược</div>
         </div>
 
         <script>
@@ -313,55 +370,30 @@ app.get('/dashboard', (req, res) => {
             alert('✅ Đã sao chép!');
         }
 
-        async function saveJwt() {
-            const jwt = document.getElementById('jwtInput').value.trim();
-            if (!jwt) { alert('Vui lòng nhập JWT'); return; }
-            const res = await fetch('/api/save-jwt', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jwt })
-            });
-            const data = await res.json();
-            if (data.success) {
-                document.getElementById('jwtStatus').innerHTML = '✅ Đã lưu JWT mới';
-                alert('Đã lưu JWT thành công!');
-            } else {
-                alert('Lỗi: ' + data.message);
+        async function placeBet() {
+            const type = document.getElementById('betType').value;
+            const amount = parseInt(document.getElementById('betAmount').value);
+            if (!amount || amount < 100) {
+                alert('Vui lòng nhập số tiền hợp lệ (>=100)');
+                return;
             }
-        }
-
-        async function autoFetchJwt() {
-            document.getElementById('jwtStatus').innerHTML = '⏳ Đang thử lấy JWT...';
-            const res = await fetch('/api/fetch-jwt-auto', { method: 'POST' });
-            const data = await res.json();
-            if (data.success && data.jwt) {
-                document.getElementById('jwtInput').value = data.jwt;
-                document.getElementById('jwtStatus').innerHTML = '✅ Đã lấy JWT tự động!';
-                alert('Lấy JWT thành công!');
-            } else {
-                document.getElementById('jwtStatus').innerHTML = '❌ Không thể lấy tự động: ' + (data.message || '');
-                alert('Không lấy được JWT. Vui lòng nhập thủ công.');
-            }
-        }
-
-        async function fetchJdbAccount() {
-            const jwt = document.getElementById('jwtInput').value.trim();
-            if (!jwt) { alert('❌ Vui lòng nhập JWT!'); return; }
-            const resultDiv = document.getElementById('jdbResult');
+            const resultDiv = document.getElementById('betResult');
             resultDiv.style.display = 'block';
-            resultDiv.innerHTML = '⏳ Đang gọi API JDB...';
+            resultDiv.innerHTML = '⏳ Đang đặt cược...';
             resultDiv.style.color = '#88bbdd';
 
             try {
-                const res = await fetch('/api/fetch-jdb', {
+                const res = await fetch('/api/place-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jwt })
+                    body: JSON.stringify({ type, amount })
                 });
                 const data = await res.json();
                 if (res.ok && data.success) {
-                    resultDiv.innerHTML = '✅ Thành công! <pre style="margin-top:8px;background:#00000055;padding:10px;border-radius:8px;font-size:12px;color:#aaddff;">' + JSON.stringify(data.data, null, 2) + '</pre>';
+                    resultDiv.innerHTML = '✅ Đặt cược thành công! <br> Số dư mới: ' + (data.newBalance || '?').toLocaleString();
                     resultDiv.style.color = '#88ffaa';
+                    // Cập nhật số dư trên giao diện
+                    if (data.newBalance) document.getElementById('balance').innerText = data.newBalance.toLocaleString();
                 } else {
                     resultDiv.innerHTML = '❌ Lỗi: ' + (data.message || JSON.stringify(data));
                     resultDiv.style.color = '#ff8888';
@@ -377,63 +409,66 @@ app.get('/dashboard', (req, res) => {
     `);
 });
 
-// ================= API: LƯU JWT =================
-app.post('/api/save-jwt', (req, res) => {
+// ================= API: ĐẶT CƯỢC =================
+app.post('/api/place-bet', async (req, res) => {
     if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
-    const { jwt } = req.body;
-    if (!jwt) return res.status(400).json({ success: false, message: 'Thiếu JWT' });
-    req.session.user.jwtToken = jwt;
-    res.json({ success: true });
-});
+    const { type, amount } = req.body;
+    if (!['TAI', 'XIU'].includes(type)) return res.status(400).json({ success: false, message: 'Loại cược không hợp lệ' });
+    if (!amount || amount < 100) return res.status(400).json({ success: false, message: 'Số tiền tối thiểu 100' });
 
-// ================= API: TỰ ĐỘNG LẤY JWT =================
-app.post('/api/fetch-jwt-auto', async (req, res) => {
-    if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
-    const { accessToken, sessionKey } = req.session.user;
-    try {
-        const jwt = await fetchJwt(accessToken, sessionKey);
-        if (jwt) {
-            req.session.user.jwtToken = jwt;
-            return res.json({ success: true, jwt });
-        } else {
-            return res.json({ success: false, message: 'Không tìm thấy endpoint lấy JWT' });
-        }
-    } catch (e) {
-        return res.status(500).json({ success: false, message: e.message });
+    const socket = req.session.user.socket;
+    if (!socket) {
+        return res.status(500).json({ success: false, message: 'WebSocket chưa kết nối' });
     }
-});
 
-// ================= API: GỌI JDB =================
-app.post('/api/fetch-jdb', async (req, res) => {
-    if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
-    const { jwt } = req.body;
-    if (!jwt) return res.status(400).json({ success: false, message: 'Thiếu JWT' });
-
-    const accessToken = req.session.user.accessToken;
-    const url = `https://athirdparty.tele68.com/v1/jdb/account?cp=R&cl=R&pf=web&at=${accessToken}`;
-
-    const headers = {
-        ...BASE_HEADERS,
-        'Host': 'athirdparty.tele68.com',
-        'Authorization': `Bearer ${jwt}`,
-        'Content-Type': 'application/json'
-    };
-
-    try {
-        const response = await fetch(url, { method: 'GET', headers });
-        const data = await response.json();
-        if (!response.ok) {
-            return res.status(response.status).json({ success: false, message: data.message || 'Unauthorized', statusCode: response.status });
+    // Kiểm tra kết nối socket
+    if (!socket.connected) {
+        // Thử kết nối lại
+        socket.connect();
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (!socket.connected) {
+            return res.status(500).json({ success: false, message: 'Không thể kết nối WebSocket' });
         }
-        return res.json({ success: true, data });
-    } catch (error) {
-        console.error('JDB API Error:', error);
-        return res.status(500).json({ success: false, message: error.message });
     }
+
+    // Gửi lệnh đặt cược qua WebSocket
+    // Định dạng: 42/txmd5,["bet",{"type":"TAI","amount":1000}]
+    // Sử dụng socket.emit với tên sự kiện 'bet'
+    // Nhưng theo log, client gửi gói 42/txmd5,["bet",...]
+    // Với socket.io, ta có thể gửi bằng socket.emit('bet', { type, amount })
+    // Tuy nhiên, để đúng format, ta có thể gửi qua socket.send (raw)
+    // Nhưng socket.io sẽ tự động đóng gói. Ta thử dùng socket.emit('bet', { type, amount })
+
+    return new Promise((resolve) => {
+        // Lắng nghe kết quả bet-result
+        const betResultHandler = (data) => {
+            // data có thể là { postBalance, amount, type }
+            console.log('🎯 Bet result:', data);
+            const newBalance = data.postBalance || null;
+            // Hủy listener sau khi nhận kết quả
+            socket.off('bet-result', betResultHandler);
+            // Trả về response
+            resolve(res.json({ success: true, newBalance }));
+        };
+
+        socket.on('bet-result', betResultHandler);
+
+        // Gửi lệnh đặt cược
+        socket.emit('bet', { type, amount });
+
+        // Timeout nếu không nhận phản hồi
+        setTimeout(() => {
+            socket.off('bet-result', betResultHandler);
+            resolve(res.status(504).json({ success: false, message: 'Timeout' }));
+        }, 15000);
+    });
 });
 
 // ================= LOGOUT =================
 app.get('/logout', (req, res) => {
+    if (req.session.user && req.session.user.socket) {
+        req.session.user.socket.disconnect();
+    }
     req.session.destroy(() => res.redirect('/'));
 });
 
