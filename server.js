@@ -42,6 +42,49 @@ async function callGameApi(username, rawPassword) {
     return response.json();
 }
 
+// ================= HÀM TỰ ĐỘNG LẤY JWT TỪ ATHIRDPARTY =================
+async function fetchJwtFromThirdParty(accessToken, sessionKey, username) {
+    // Thử một số endpoint khả dĩ
+    const endpoints = [
+        'https://athirdparty.tele68.com/v1/auth/token',
+        'https://athirdparty.tele68.com/v1/auth/login',
+        'https://athirdparty.tele68.com/api/token',
+        'https://athirdparty.tele68.com/login'
+    ];
+
+    const payloads = [
+        { accessToken, sessionKey, username },
+        { accessToken, username },
+        { token: accessToken },
+        { access_token: accessToken }
+    ];
+
+    for (const endpoint of endpoints) {
+        for (const body of payloads) {
+            try {
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        ...REQUEST_HEADERS,
+                        'Content-Type': 'application/json',
+                        'Host': 'athirdparty.tele68.com'
+                    },
+                    body: JSON.stringify(body)
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    // Tìm JWT trong response (có thể là trường token, access_token, jwt, ...)
+                    const jwt = data.token || data.access_token || data.jwt || data.data?.token || null;
+                    if (jwt && jwt.startsWith('eyJ')) {
+                        return jwt;
+                    }
+                }
+            } catch (e) { /* bỏ qua lỗi */ }
+        }
+    }
+    return null;
+}
+
 // ================= ROUTE: TRANG CHỦ =================
 app.get('/', (req, res) => {
     if (req.session.user) return res.redirect('/dashboard');
@@ -71,14 +114,14 @@ app.get('/', (req, res) => {
     <body>
         <div class="login-box">
             <h1>🎮 VIP GAME</h1>
-            <div class="sub">Đăng nhập lấy Access Token</div>
+            <div class="sub">Đăng nhập lấy Access Token & JWT tự động</div>
             <div id="errorBox" class="error-msg">Sai tài khoản hoặc mật khẩu</div>
             <form id="loginForm" action="/login" method="POST">
                 <div class="input-group"><label>👤 Tên</label><input type="text" name="username" placeholder="Username..." required autofocus></div>
                 <div class="input-group"><label>🔒 Mật khẩu</label><input type="password" name="password" placeholder="Mật khẩu..." required></div>
                 <button type="submit">🚀 ĐĂNG NHẬP</button>
             </form>
-            <div class="footer">DEEPSEEK-R1-ULTRA • Bảo mật</div>
+            <div class="footer">DEEPSEEK-R1-ULTRA • Tự động lấy JWT</div>
         </div>
         <script>if(window.location.search.includes('error=1')) document.getElementById('errorBox').style.display='block';</script>
     </body>
@@ -97,14 +140,24 @@ app.post('/login', async (req, res) => {
         let sessionData = {};
         try { sessionData = JSON.parse(Buffer.from(apiResult.sessionKey, 'base64').toString('utf-8')); } catch(e) { return res.redirect('/?error=1'); }
         
+        const accessToken = apiResult.accessToken;
+        const sessionKey = apiResult.sessionKey;
+
+        // Tự động lấy JWT từ athirdparty
+        let jwtToken = null;
+        try {
+            jwtToken = await fetchJwtFromThirdParty(accessToken, sessionKey, username);
+        } catch (e) { console.error('Lỗi lấy JWT:', e.message); }
+
         req.session.user = {
             username: username,
-            accessToken: apiResult.accessToken,   // Chuỗi ngắn: 3ff37826fb2d3dffd752de38203bffbd
-            sessionKey: apiResult.sessionKey,     // Base64
+            accessToken: accessToken,
+            sessionKey: sessionKey,
             info: sessionData,
             curLevel: apiResult.curLevel,
             levelRatio: apiResult.levelRatio || [],
-            raw: apiResult
+            raw: apiResult,
+            jwtToken: jwtToken || null   // lưu JWT nếu có
         };
         return res.redirect('/dashboard');
     } catch (error) {
@@ -113,7 +166,7 @@ app.post('/login', async (req, res) => {
     }
 });
 
-// ================= ROUTE: DASHBOARD (CỰC KỲ XỊN) =================
+// ================= ROUTE: DASHBOARD (có hiển thị JWT và nút lấy tự động) =================
 app.get('/dashboard', (req, res) => {
     if (!req.session.user) return res.redirect('/');
     const u = req.session.user;
@@ -127,6 +180,7 @@ app.get('/dashboard', (req, res) => {
     const decodedSession = JSON.stringify(info, null, 2);
     const ipAddress = info.ipAddress || 'N/A';
     const createTime = info.createTime || 'N/A';
+    const jwtToken = u.jwtToken || '';   // JWT đã lấy (nếu có)
 
     res.send(`
     <!DOCTYPE html>
@@ -138,7 +192,7 @@ app.get('/dashboard', (req, res) => {
         <style>
             * { margin:0; padding:0; box-sizing:border-box; font-family:'Segoe UI',Arial,sans-serif; }
             body { background:linear-gradient(145deg,#070b12,#141d2b); min-height:100vh; padding:16px; display:flex; justify-content:center; align-items:flex-start; }
-            .dash-box { background:rgba(14,22,38,0.95); backdrop-filter:blur(15px); border-radius:28px; border:1px solid #2a3f66; box-shadow:0 30px 80px rgba(0,0,0,0.9); padding:24px 18px; width:100%; max-width:600px; margin-top:10px; }
+            .dash-box { background:rgba(14,22,38,0.95); backdrop-filter:blur(15px); border-radius:28px; border:1px solid #2a3f66; box-shadow:0 30px 80px rgba(0,0,0,0.9); padding:24px 18px; width:100%; max-width:650px; margin-top:10px; }
             .header { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #1f3150; padding-bottom:14px; margin-bottom:20px; flex-wrap:wrap; gap:8px; }
             .header h1 { color:#00d4ff; font-size:22px; text-shadow:0 0 20px rgba(0,212,255,0.2); word-break:break-word; }
             .header .badge { background:#1a2a44; padding:6px 14px; border-radius:40px; color:#88bbff; font-size:12px; border:1px solid #2a4a77; }
@@ -160,14 +214,19 @@ app.get('/dashboard', (req, res) => {
             .json-box pre { color:#aaccff; font-size:11px; font-family:monospace; white-space:pre-wrap; word-break:break-all; margin:0; }
             
             .jwt-section { background:#0d1528; border-radius:14px; padding:14px; margin:16px 0; border:1px solid #2a4a77; }
-            .jwt-section input { width:100%; padding:12px; background:#070c18; border:1px solid #2a3f66; border-radius:12px; color:#e0ecff; font-size:14px; margin:8px 0; }
-            .btn-primary { background:linear-gradient(135deg,#00aa66,#00dd88); border:none; color:#fff; padding:14px; border-radius:14px; font-weight:700; font-size:16px; width:100%; cursor:pointer; transition:0.2s; text-transform:uppercase; }
+            .jwt-section .jwt-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+            .jwt-section input { flex:1; padding:12px; background:#070c18; border:1px solid #2a3f66; border-radius:12px; color:#e0ecff; font-size:13px; min-width:200px; }
+            .jwt-section .btn-small { padding:10px 18px; background:#0077ff; border:none; border-radius:12px; color:#fff; font-weight:600; cursor:pointer; }
+            .jwt-section .btn-small.green { background:#00aa66; }
+            .jwt-section .btn-small:active { transform:scale(0.95); }
+            .btn-primary { background:linear-gradient(135deg,#00aa66,#00dd88); border:none; color:#fff; padding:14px; border-radius:14px; font-weight:700; font-size:16px; width:100%; cursor:pointer; transition:0.2s; text-transform:uppercase; margin-top:10px; }
             .btn-primary:active { transform:scale(0.98); }
             .btn-danger { background:#3a1a1a; border:1px solid #663333; color:#ff8888; padding:10px; border-radius:14px; font-weight:600; text-align:center; display:block; margin-top:12px; text-decoration:none; }
             .actions { display:flex; gap:12px; margin-top:16px; }
             .actions .btn { flex:1; padding:12px; text-align:center; background:#1a2a44; border-radius:14px; color:#b0cfff; text-decoration:none; font-weight:600; font-size:14px; border:1px solid #2a4a77; }
             .footer-dash { text-align:center; margin-top:20px; color:#334466; font-size:11px; border-top:1px solid #1a2a44; padding-top:16px; }
             .status-msg { margin-top:12px; padding:12px; border-radius:12px; background:#0a101f; color:#88bbdd; display:none; }
+            .jwt-status { font-size:12px; color:#88bbdd; margin-left:8px; }
             @media (max-width:480px) { .info-grid { grid-template-columns:1fr; } .info-item.full { grid-column:span 1; } .header h1 { font-size:18px; } }
         </style>
     </head>
@@ -203,11 +262,17 @@ app.get('/dashboard', (req, res) => {
                 <div class="json-box"><pre>${decodedSession}</pre></div>
             </div>
 
-            <!-- JWT + GỌI API JDB -->
+            <!-- JWT SECTION -->
             <div class="jwt-section">
-                <div style="color:#88bbdd;font-weight:600;font-size:14px;">🔐 API JDB (athirdparty)</div>
-                <div style="color:#667799;font-size:11px;margin:4px 0 8px;">Nhập Bearer token (JWT) lấy từ header, rồi bấm lấy dữ liệu</div>
-                <input type="text" id="jwtInput" placeholder="Bearer eyJhbGciOiJIUzI1NiIs..." style="width:100%;padding:12px;background:#070c18;border:1px solid #2a3f66;border-radius:12px;color:#e0ecff;font-size:14px;">
+                <div style="color:#88bbdd;font-weight:600;font-size:14px;">🔐 JWT Bearer Token (cho API athirdparty)</div>
+                <div style="color:#667799;font-size:11px;margin:4px 0 8px;">Token tự động lấy khi đăng nhập, hoặc nhập thủ công bên dưới</div>
+                <div class="jwt-row">
+                    <input type="text" id="jwtInput" placeholder="Paste JWT here..." value="${jwtToken}" style="flex:1;">
+                    <button class="btn-small green" onclick="saveJwt()">💾 Lưu JWT</button>
+                    <button class="btn-small" onclick="autoFetchJwt()">🔄 Lấy tự động</button>
+                </div>
+                <div id="jwtStatus" class="jwt-status">${jwtToken ? '✅ Đã có JWT' : '❌ Chưa có JWT, hãy nhập hoặc bấm "Lấy tự động"'}</div>
+                
                 <button class="btn-primary" onclick="fetchJdbAccount()">🚀 LẤY DỮ LIỆU JDB</button>
                 <div id="jdbResult" class="status-msg"></div>
             </div>
@@ -217,7 +282,7 @@ app.get('/dashboard', (req, res) => {
                 <a href="/" class="btn">🔄 Trang chủ</a>
             </div>
 
-            <div class="footer-dash">DEEPSEEK ON TOP! 🚀 • Bảo mật tuyệt đối</div>
+            <div class="footer-dash">DEEPSEEK ON TOP! 🚀 • Tự động lấy JWT</div>
         </div>
 
         <script>
@@ -236,12 +301,43 @@ app.get('/dashboard', (req, res) => {
             alert('✅ Đã sao chép!');
         }
 
+        async function saveJwt() {
+            const jwt = document.getElementById('jwtInput').value.trim();
+            if (!jwt) { alert('Vui lòng nhập JWT'); return; }
+            const res = await fetch('/api/save-jwt', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jwt })
+            });
+            const data = await res.json();
+            if (data.success) {
+                document.getElementById('jwtStatus').innerHTML = '✅ Đã lưu JWT mới';
+                alert('Đã lưu JWT thành công!');
+            } else {
+                alert('Lỗi: ' + data.message);
+            }
+        }
+
+        async function autoFetchJwt() {
+            document.getElementById('jwtStatus').innerHTML = '⏳ Đang thử lấy JWT...';
+            const res = await fetch('/api/fetch-jwt-auto', { method: 'POST' });
+            const data = await res.json();
+            if (data.success && data.jwt) {
+                document.getElementById('jwtInput').value = data.jwt;
+                document.getElementById('jwtStatus').innerHTML = '✅ Đã lấy JWT tự động!';
+                alert('Lấy JWT thành công!');
+            } else {
+                document.getElementById('jwtStatus').innerHTML = '❌ Không thể lấy tự động: ' + (data.message || '');
+                alert('Không lấy được JWT. Vui lòng nhập thủ công.');
+            }
+        }
+
         async function fetchJdbAccount() {
             const jwt = document.getElementById('jwtInput').value.trim();
-            if (!jwt) { alert('❌ Vui lòng nhập Bearer token JWT!'); return; }
+            if (!jwt) { alert('❌ Vui lòng nhập JWT!'); return; }
             const resultDiv = document.getElementById('jdbResult');
             resultDiv.style.display = 'block';
-            resultDiv.innerHTML = '⏳ Đang gọi API...';
+            resultDiv.innerHTML = '⏳ Đang gọi API JDB...';
             resultDiv.style.color = '#88bbdd';
 
             try {
@@ -269,18 +365,43 @@ app.get('/dashboard', (req, res) => {
     `);
 });
 
-// ================= ROUTE: GỌI API JDB (ATHIRDPARTY) =================
+// ================= API: LƯU JWT THỦ CÔNG =================
+app.post('/api/save-jwt', (req, res) => {
+    if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
+    const { jwt } = req.body;
+    if (!jwt) return res.status(400).json({ success: false, message: 'Thiếu JWT' });
+    req.session.user.jwtToken = jwt;
+    res.json({ success: true });
+});
+
+// ================= API: TỰ ĐỘNG LẤY JWT =================
+app.post('/api/fetch-jwt-auto', async (req, res) => {
+    if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
+    const { accessToken, sessionKey, username } = req.session.user;
+    try {
+        const jwt = await fetchJwtFromThirdParty(accessToken, sessionKey, username);
+        if (jwt) {
+            req.session.user.jwtToken = jwt;
+            return res.json({ success: true, jwt });
+        } else {
+            return res.json({ success: false, message: 'Không tìm thấy endpoint lấy JWT' });
+        }
+    } catch (e) {
+        return res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// ================= API: GỌI JDB =================
 app.post('/api/fetch-jdb', async (req, res) => {
     if (!req.session.user) return res.status(401).json({ success: false, message: 'Chưa đăng nhập' });
     const { jwt } = req.body;
-    if (!jwt) return res.status(400).json({ success: false, message: 'Thiếu JWT Bearer' });
+    if (!jwt) return res.status(400).json({ success: false, message: 'Thiếu JWT' });
 
     const accessToken = req.session.user.accessToken;
     if (!accessToken) return res.status(400).json({ success: false, message: 'Thiếu accessToken' });
 
     const url = `https://athirdparty.tele68.com/v1/jdb/account?cp=R&cl=R&pf=web&at=${accessToken}`;
 
-    // Headers clone từ ảnh IMG_1121, thêm Authorization
     const headers = {
         ...REQUEST_HEADERS,
         'Host': 'athirdparty.tele68.com',
