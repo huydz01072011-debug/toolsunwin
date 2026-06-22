@@ -4,21 +4,24 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Cấu hình tự ping để tránh ngủ trên Render
+const SELF_URL = process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
-const MAX_HISTORY = 10000;               
-const FETCH_INTERVAL = 1500;             
-const PATTERN_LENGTH = 10;        
+const MAX_HISTORY = 10000;
+const FETCH_INTERVAL = 1500;
+const PATTERN_LENGTH = 10;
 const DEFAULT_HOST_TX = 'wtx.tele68.com';
 const DEFAULT_HOST_TXMD5 = 'wtxmd52.tele68.com';
 const API_TX = 'https://wtx.tele68.com/v1/tx/lite-sessions';
 const API_TXMD5 = 'https://wtxmd52.tele68.com/v1/txmd5/lite-sessions';
 
-let txHistory = [];                 
-let txmd5History = [];             
-const txIdSet = new Set();   
+let txHistory = [];
+let txmd5History = [];
+const txIdSet = new Set();
 const txmd5IdSet = new Set();
 let txPredictions = [];
 let txmd5Predictions = [];
+
 function buildHeaders(host) {
   return {
     'Host': host,
@@ -39,6 +42,7 @@ function buildHeaders(host) {
     'priority': 'u=1, i'
   };
 }
+
 function transformData(list) {
   return list.map(item => ({
     phien: item.id,
@@ -50,9 +54,11 @@ function transformData(list) {
     id: '@HuyDaiXuVN'
   }));
 }
+
 function sortHistory(arr) {
   arr.sort((a, b) => b.phien - a.phien);
 }
+
 function trimHistory(historyArray, idSet) {
   if (historyArray.length > MAX_HISTORY) {
     historyArray.sort((a, b) => b.phien - a.phien);
@@ -60,6 +66,7 @@ function trimHistory(historyArray, idSet) {
     removed.forEach(item => idSet.delete(item.phien));
   }
 }
+
 function addToHistory(newItems, historyArray, idSet) {
   let addedCount = 0;
   for (const item of newItems) {
@@ -76,6 +83,7 @@ function addToHistory(newItems, historyArray, idSet) {
   }
   return addedCount;
 }
+
 function checkPredictions(newItems) {
   [txPredictions, txmd5Predictions].forEach(predArray => {
     predArray.forEach(pred => {
@@ -88,6 +96,7 @@ function checkPredictions(newItems) {
     });
   });
 }
+
 async function fetchAndUpdate(apiUrl, host, historyArray, idSet, sourceLabel) {
   try {
     const response = await axios.get(apiUrl, {
@@ -108,12 +117,14 @@ async function fetchAndUpdate(apiUrl, host, historyArray, idSet, sourceLabel) {
     console.error(`[${sourceLabel}] Lỗi fetch: ${error.message}`);
   }
 }
+
 async function crawlAll() {
   await Promise.allSettled([
     fetchAndUpdate(API_TX, DEFAULT_HOST_TX, txHistory, txIdSet, 'TX'),
     fetchAndUpdate(API_TXMD5, DEFAULT_HOST_TXMD5, txmd5History, txmd5IdSet, 'TXMD5')
   ]);
 }
+
 function predict(historyArray, sourceName) {
   if (historyArray.length < PATTERN_LENGTH + 1) {
     return null;
@@ -187,7 +198,10 @@ function predict(historyArray, sourceName) {
     pattern: patternStr,
     du_doan: duDoan,
     do_tin_cay: doTinCay,
-    id: '@HuyDaiXuVN' 
+    id: '@HuyDaiXuVN'
+  }; // Đóng object
+
+  // Lưu dự đoán vào mảng tương ứng
   const predStorage = sourceName === 'TX' ? txPredictions : txmd5Predictions;
   const alreadyPredicted = predStorage.some(p => p.phienDuDoan === phienHienTai);
   if (!alreadyPredicted) {
@@ -204,11 +218,15 @@ function predict(historyArray, sourceName) {
 
   return predictionResult;
 }
+
+// Middleware CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
   next();
 });
+
+// Trang chủ
 app.get('/', (req, res) => {
   res.send(`
     <h1>🎲 SERVER DỰ ĐOÁN TÀI XỈU VIP</h1>
@@ -223,6 +241,13 @@ app.get('/', (req, res) => {
     <p>Server đang crawl dữ liệu mỗi ${FETCH_INTERVAL/1000}s. Lịch sử hiện có: TX=${txHistory.length}, TXMD5=${txmd5History.length}</p>
   `);
 });
+
+// Endpoint ping để tự giữ server awake
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
+
+// Lịch sử TX
 app.get('/api/history/tx', (req, res) => {
   const limit = parseInt(req.query.limit) || txHistory.length;
   const sorted = [...txHistory].sort((a, b) => b.phien - a.phien);
@@ -230,6 +255,8 @@ app.get('/api/history/tx', (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.send(JSON.stringify(result));
 });
+
+// Lịch sử TXMD5
 app.get('/api/history/txmd5', (req, res) => {
   const limit = parseInt(req.query.limit) || txmd5History.length;
   const sorted = [...txmd5History].sort((a, b) => b.phien - a.phien);
@@ -237,6 +264,8 @@ app.get('/api/history/txmd5', (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.send(JSON.stringify(result));
 });
+
+// Dự đoán TX
 app.get('/api/dudoan/tx', (req, res) => {
   const prediction = predict(txHistory, 'TX');
   if (!prediction) {
@@ -244,6 +273,8 @@ app.get('/api/dudoan/tx', (req, res) => {
   }
   res.json(prediction);
 });
+
+// Dự đoán TXMD5
 app.get('/api/dudoan/txmd5', (req, res) => {
   const prediction = predict(txmd5History, 'TXMD5');
   if (!prediction) {
@@ -251,6 +282,8 @@ app.get('/api/dudoan/txmd5', (req, res) => {
   }
   res.json(prediction);
 });
+
+// Trạng thái và bảng dự đoán
 app.get('/status', (req, res) => {
   const renderPredictionTable = (predictions, label) => {
     if (!predictions || predictions.length === 0) return `<p>Chưa có dự đoán ${label}.</p>`;
@@ -315,9 +348,15 @@ app.get('/status', (req, res) => {
   `;
   res.send(html);
 });
+
 app.listen(PORT, () => {
   console.log(`🚀 Server VIP đang chạy tại http://localhost:${PORT}`);
   console.log(`⏳ Bắt đầu crawl dữ liệu mỗi ${FETCH_INTERVAL/1000}s...`);
   crawlAll();
   setInterval(crawlAll, FETCH_INTERVAL);
+  setInterval(() => {
+    axios.get(`${SELF_URL}/ping`)
+      .then(() => console.log('✅ Ping thành công'))
+      .catch(err => console.error('❌ Ping lỗi:', err.message));
+  }, 60000);
 });
