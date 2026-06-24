@@ -7,7 +7,7 @@ const port = 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Proxy API đăng nhập (tránh CORS)
+// Proxy API đăng nhập
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -608,40 +608,50 @@ app.get('/', (req, res) => {
 
     // ==================== SỰ KIỆN ====================
 
-    loginForm.addEventListener('submit', async function(e) {
-        e.preventDefault(); // Ngăn reload trang
+    // Xử lý submit form - KHÔNG RELOAD
+    loginForm.addEventListener('submit', function(event) {
+        // Ngăn chặn reload trang
+        event.preventDefault();
+        event.stopPropagation();
+
         const username = usernameInput.value.trim();
         const password = passwordInput.value.trim();
         if (!username || !password) {
             showMessage('error', 'Vui lòng nhập đầy đủ thông tin');
-            return;
+            return false;
         }
 
         loginBtn.disabled = true;
         loginBtn.textContent = 'Đang xử lý...';
         msgBox.style.display = 'none';
 
-        try {
-            const res = await fetch('/api/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
-            });
-            const data = await res.json();
+        // Gọi API login
+        fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        })
+        .then(res => res.json())
+        .then(data => {
             if (data.success === true) {
                 showAccountView(data);
             } else {
                 const errMsg = data.error || data.errorCode || 'Sai tài khoản hoặc mật khẩu';
                 showMessage('error', 'Đăng nhập thất bại', errMsg);
             }
-        } catch (err) {
+        })
+        .catch(err => {
             showMessage('error', 'Lỗi kết nối', err.message);
-        } finally {
+        })
+        .finally(() => {
             loginBtn.disabled = false;
             loginBtn.textContent = 'Đăng Nhập';
-        }
+        });
+
+        return false;
     });
 
+    // Các sự kiện khác
     goBetBtn.addEventListener('click', function() {
         if (!accessToken) {
             alert('Chưa có token. Vui lòng đăng nhập lại.');
@@ -670,6 +680,7 @@ app.get('/', (req, res) => {
         }
     });
 
+    // Khởi tạo
     showLoginView();
 })();
 </script>
