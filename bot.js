@@ -119,7 +119,7 @@ bot.onText(/\/start/, (msg) => {
         `/balance - Xem số dư\n` +
         `/bet <tai|xiu> <số tiền> - Đặt cược\n` +
         `/logout - Đăng xuất\n\n` +
-        `📝 Ví dụ:\n` +
+        `📝 **Ví dụ:**\n` +
         `/login huybucuadm matkhau123\n` +
         `/bet tai 1000`,
         { parse_mode: 'Markdown' }
