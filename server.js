@@ -1,9 +1,6 @@
 // =============================================
 //  Sun.Win Tài Xỉu Data Stream - VIP Node.js
 //  Tác giả: HuyDaiXuVN
-//  Full: Token gộp, Auto ping, WebSocket, History,
-//        Dự đoán LogicPen V4 (100% nguyên bản),
-//        Check real-time + Thống kê chi tiết
 // =============================================
 
 const express = require('express');
@@ -32,7 +29,7 @@ const WS_OPTIONS = {
     }
 };
 
-// Tin nhắn khởi tạo (đã gộp TOKEN_DATA)
+// Tin nhắn khởi tạo
 const initialMessages = [
     [
         1,
@@ -72,9 +69,9 @@ let currentResult = {
 
 let currentSessionId = null;
 const MAX_HISTORY = 1000000;
-const history = [];                     // Mảng lưu các phiên (thứ tự thời gian tăng dần)
+const history = [];
 
-// --------------- LỚP DỰ ĐOÁN (NGUYÊN BẢN 100%) ---------------
+// --------------- LỚP DỰ ĐOÁN (NGUYÊN BẢN) ---------------
 class TX_LogicPen_V4 {
     constructor() {
         this.error_streak = 0;
@@ -84,7 +81,6 @@ class TX_LogicPen_V4 {
     }
 
     loadData(data) {
-        // Sắp xếp giảm dần theo phien (mới nhất đầu)
         this.history = [...data].sort((a, b) => (b.phien || 0) - (a.phien || 0));
     }
 
@@ -225,7 +221,7 @@ class TX_LogicPen_V4 {
     }
 }
 
-// --------------- HỆ THỐNG THỐNG KÊ CHI TIẾT ---------------
+// --------------- THỐNG KÊ ---------------
 let detailedStats = {
     byPattern: {
         'Đu Bệt': { total: 0, correct: 0, wrong: 0 },
@@ -256,7 +252,7 @@ let detailedStats = {
         'TAI': { total: 0, correct: 0, wrong: 0 },
         'XIU': { total: 0, correct: 0, wrong: 0 }
     },
-    recentHistory: [],   // 1000 phần tử gần nhất
+    recentHistory: [],
     summary: {
         totalPredictions: 0,
         totalCorrect: 0,
@@ -276,7 +272,7 @@ let stats = {
     worst_streak: 0
 };
 
-function updateDetailedStats(prediction, actual, pattern, confidence, correct) {
+function updateDetailedStats(prediction, actual, pattern, confidence, correct, phien) {
     if (pattern && detailedStats.byPattern[pattern]) {
         detailedStats.byPattern[pattern].total++;
         if (correct) detailedStats.byPattern[pattern].correct++;
@@ -304,7 +300,7 @@ function updateDetailedStats(prediction, actual, pattern, confidence, correct) {
     }
 
     detailedStats.recentHistory.push({
-        phien: pendingCheck?.phien || 0,
+        phien: phien,
         prediction: prediction,
         actual: actual,
         pattern: pattern,
@@ -317,7 +313,6 @@ function updateDetailedStats(prediction, actual, pattern, confidence, correct) {
         detailedStats.recentHistory = detailedStats.recentHistory.slice(-1000);
     }
 
-    // Cập nhật summary
     detailedStats.summary.totalPredictions = stats.total;
     detailedStats.summary.totalCorrect = stats.correct;
     detailedStats.summary.totalWrong = stats.wrong;
@@ -328,16 +323,9 @@ function updateDetailedStats(prediction, actual, pattern, confidence, correct) {
     detailedStats.summary.lastUpdated = getVietnamTime();
 }
 
-// Instance toàn cục của predictor (giữ trạng thái error_streak)
 const predictor = new TX_LogicPen_V4();
-
-// Lưu các dự đoán đang chờ
 const pendingPredictions = [];
 
-// Biến tạm để truyền dữ liệu cho updateDetailedStats
-let pendingCheck = null;
-
-// --------------- HÀM TIỆN ÍCH ---------------
 function getVietnamTime() {
     const now = new Date();
     const utc7 = new Date(now.getTime() + 7 * 60 * 60 * 1000);
@@ -355,7 +343,6 @@ function addToHistory(result) {
     if (history.length > MAX_HISTORY) history.shift();
 }
 
-// Kiểm tra pending predictions khi có kết quả mới
 function checkPendingPredictions(newResult) {
     const phien = newResult.phien;
     const actual = newResult.ket_qua;
@@ -365,10 +352,8 @@ function checkPendingPredictions(newResult) {
         const p = pendingPredictions[i];
         if (p.phien === phien) {
             const correct = p.prediction === actual;
-            // Cập nhật trạng thái error_streak cho predictor
             predictor.updateStatus(actual);
 
-            // Cập nhật thống kê
             stats.total++;
             if (correct) {
                 stats.correct++;
@@ -377,7 +362,6 @@ function checkPendingPredictions(newResult) {
             } else {
                 stats.wrong++;
                 stats.current_streak = 0;
-                // Tính worst streak
                 let wrongStreak = 0;
                 for (let j = detailedStats.recentHistory.length - 1; j >= 0; j--) {
                     if (!detailedStats.recentHistory[j].correct) wrongStreak++;
@@ -386,18 +370,12 @@ function checkPendingPredictions(newResult) {
                 if (wrongStreak > stats.worst_streak) stats.worst_streak = wrongStreak;
             }
 
-            // Lưu vào recentHistory và cập nhật detailedStats
-            pendingCheck = { phien: phien };
-            updateDetailedStats(p.prediction, actual, p.type, p.conf, correct);
-            pendingCheck = null;
-
-            // Xóa khỏi pending
+            updateDetailedStats(p.prediction, actual, p.type, p.conf, correct, phien);
             pendingPredictions.splice(i, 1);
             break;
         }
     }
 
-    // Dọn dẹp pending quá cũ
     const minPhien = phien - 10;
     for (let i = pendingPredictions.length - 1; i >= 0; i--) {
         if (pendingPredictions[i].phien < minPhien) {
@@ -406,7 +384,7 @@ function checkPendingPredictions(newResult) {
     }
 }
 
-// --------------- WEBSOCKET CLIENT ---------------
+// --------------- WEBSOCKET ---------------
 function connectWebSocket() {
     console.log("[🔄] Đang kết nối WebSocket...");
     const ws = new WebSocket(WS_URL, WS_OPTIONS);
@@ -455,9 +433,7 @@ function connectWebSocket() {
                 addToHistory(newResult);
                 console.log(`[🎲] #${newResult.phien}: ${d1}-${d2}-${d3} = ${total} (${result})`);
 
-                // Kiểm tra pending predictions
                 checkPendingPredictions(newResult);
-
                 currentSessionId = null;
             }
         } catch (e) {
@@ -487,7 +463,7 @@ function keepAlive() {
     }, 60000);
 }
 
-// ==================== EXPRESS ROUTES ====================
+// --------------- ROUTES ---------------
 app.get('/', (req, res) => {
     res.json({
         app: "Sun.Win Tài Xỉu Data Stream (VIP)",
@@ -495,13 +471,11 @@ app.get('/', (req, res) => {
         author: "HuyDaiXuVN",
         endpoints: {
             "/api/tx": "Kết quả mới nhất",
-            "/api/history": "Lịch sử 1.000.000 phiên (mới nhất đầu)",
-            "/api/dudoan": "Dự đoán phiên tiếp theo (LogicPen V4 100%)",
-            "/api/check": "Giao diện real-time kiểm tra & thống kê chi tiết",
-            "/api/check/data": "Dữ liệu JSON cho giao diện check"
-        },
-        thoi_gian: getVietnamTime(),
-        user: TOKEN_DATA.username
+            "/api/history": "Lịch sử 1.000.000 phiên",
+            "/api/dudoan": "Dự đoán phiên tiếp theo",
+            "/api/check": "Giao diện kiểm tra real-time",
+            "/api/check/data": "Dữ liệu JSON kiểm tra"
+        }
     });
 });
 
@@ -511,26 +485,18 @@ app.get('/api/tx', (req, res) => {
 
 app.get('/api/history', (req, res) => {
     const reversed = [...history].reverse();
-    res.json({
-        total: reversed.length,
-        history: reversed
-    });
+    res.json({ total: reversed.length, history: reversed });
 });
 
 app.get('/api/dudoan', (req, res) => {
     if (history.length < 5) {
-        return res.json({
-            error: "Chưa đủ dữ liệu (cần ít nhất 5 phiên)",
-            current_count: history.length
-        });
+        return res.json({ error: "Chưa đủ dữ liệu (cần ít nhất 5 phiên)", current_count: history.length });
     }
 
-    const prediction = predictor.predict(history);  // predictor toàn cục, giữ error_streak
-
+    const prediction = predictor.predict(history);
     const latest = history[history.length - 1];
     const nextPhien = (latest.phien || 0) + 1;
 
-    // Lưu pending
     pendingPredictions.push({
         phien: nextPhien,
         prediction: prediction.pred,
@@ -550,10 +516,30 @@ app.get('/api/dudoan', (req, res) => {
     });
 });
 
-// Giao diện kiểm tra real-time (HTML nâng cao)
 app.get('/api/check', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
+    res.sendFile(__dirname + '/check.html'); // Tách HTML ra file riêng để tránh lỗi
+});
+
+app.get('/api/check/data', (req, res) => {
+    res.json({
+        recentHistory: detailedStats.recentHistory,
+        byPattern: detailedStats.byPattern,
+        byConfidence: detailedStats.byConfidence,
+        byPrediction: detailedStats.byPrediction,
+        summary: detailedStats.summary
+    });
+});
+
+app.use((req, res) => {
+    res.status(404).json({ error: "Endpoint không tồn tại" });
+});
+
+// Tạo file check.html (tự động nếu chưa có)
+const fs = require('fs');
+const path = require('path');
+const checkHtmlPath = path.join(__dirname, 'check.html');
+if (!fs.existsSync(checkHtmlPath)) {
+    const htmlContent = `<!DOCTYPE html>
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
@@ -563,7 +549,7 @@ app.get('/api/check', (req, res) => {
         body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 20px; }
         h1, h2 { color: #ffd700; text-align: center; }
         .container { max-width: 1200px; margin: auto; }
-        table { width: 100%; border-collapse: collapse; margin: 15px 0; background: #16213e; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; background: #16213e; }
         th, td { padding: 10px; text-align: center; border: 1px solid #0f3460; }
         th { background: #0f3460; color: #ffd700; }
         .correct { color: #4caf50; font-weight: bold; }
@@ -596,68 +582,26 @@ app.get('/api/check', (req, res) => {
         </div>
 
         <div id="historyTab" class="tab-content active">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Phiên</th>
-                        <th>Dự đoán</th>
-                        <th>Thực tế</th>
-                        <th>Đúng/Sai</th>
-                        <th>Độ tin cậy</th>
-                        <th>Loại cầu</th>
-                        <th>Thời gian</th>
-                    </tr>
-                </thead>
-                <tbody id="historyBody"></tbody>
-            </table>
+            <table><thead><tr><th>Phiên</th><th>Dự đoán</th><th>Thực tế</th><th>Đúng/Sai</th><th>Độ tin cậy</th><th>Loại cầu</th><th>Thời gian</th></tr></thead>
+            <tbody id="historyBody"></tbody></table>
         </div>
 
         <div id="patternsTab" class="tab-content">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Loại cầu</th>
-                        <th>Tổng</th>
-                        <th>Đúng</th>
-                        <th>Sai</th>
-                        <th>Tỉ lệ %</th>
-                    </tr>
-                </thead>
-                <tbody id="patternsBody"></tbody>
-            </table>
+            <table><thead><tr><th>Loại cầu</th><th>Tổng</th><th>Đúng</th><th>Sai</th><th>Tỉ lệ %</th></tr></thead>
+            <tbody id="patternsBody"></tbody></table>
         </div>
 
         <div id="confidenceTab" class="tab-content">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Độ tin cậy</th>
-                        <th>Tổng</th>
-                        <th>Đúng</th>
-                        <th>Sai</th>
-                        <th>Tỉ lệ %</th>
-                    </tr>
-                </thead>
-                <tbody id="confidenceBody"></tbody>
-            </table>
+            <table><thead><tr><th>Độ tin cậy</th><th>Tổng</th><th>Đúng</th><th>Sai</th><th>Tỉ lệ %</th></tr></thead>
+            <tbody id="confidenceBody"></tbody></table>
         </div>
 
         <div id="predictionTab" class="tab-content">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Dự đoán</th>
-                        <th>Tổng</th>
-                        <th>Đúng</th>
-                        <th>Sai</th>
-                        <th>Tỉ lệ %</th>
-                    </tr>
-                </thead>
-                <tbody id="predictionBody"></tbody>
-            </table>
+            <table><thead><tr><th>Dự đoán</th><th>Tổng</th><th>Đúng</th><th>Sai</th><th>Tỉ lệ %</th></tr></thead>
+            <tbody id="predictionBody"></tbody></table>
         </div>
 
-        <div class="footer" style="text-align:center; color:#aaa; margin-top:20px;">by HuyDaiXuVN | Tự động cập nhật mỗi 2 giây</div>
+        <div style="text-align:center; color:#aaa; margin-top:20px;">by HuyDaiXuVN | Tự động cập nhật mỗi 2 giây</div>
     </div>
 
     <script>
@@ -700,15 +644,13 @@ app.get('/api/check', (req, res) => {
             }
             [...history].reverse().forEach(item => {
                 const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td>${item.phien || ''}</td>
-                    <td>${item.prediction || ''}</td>
-                    <td>${item.actual || ''}</td>
-                    <td class="${item.correct ? 'correct' : 'wrong'}">${item.correct ? '✅ Đúng' : '❌ Sai'}</td>
-                    <td>${item.confidence || ''}%</td>
-                    <td>${item.pattern || ''}</td>
-                    <td>${item.timestamp || ''}</td>
-                `;
+                row.innerHTML = '<td>' + (item.phien || '') + '</td>' +
+                    '<td>' + (item.prediction || '') + '</td>' +
+                    '<td>' + (item.actual || '') + '</td>' +
+                    '<td class="' + (item.correct ? 'correct' : 'wrong') + '">' + (item.correct ? '✅ Đúng' : '❌ Sai') + '</td>' +
+                    '<td>' + (item.confidence || '') + '%</td>' +
+                    '<td>' + (item.pattern || '') + '</td>' +
+                    '<td>' + (item.timestamp || '') + '</td>';
                 tbody.appendChild(row);
             });
         }
@@ -723,14 +665,7 @@ app.get('/api/check', (req, res) => {
             }
             sorted.forEach(([name, data]) => {
                 const rate = (data.correct / data.total * 100).toFixed(1);
-                tbody.innerHTML += `
-                    <tr>
-                        <td>${name}</td>
-                        <td>${data.total}</td>
-                        <td>${data.correct}</td>
-                        <td>${data.wrong}</td>
-                        <td>${rate}%</td>
-                    </tr>`;
+                tbody.innerHTML += '<tr><td>' + name + '</td><td>' + data.total + '</td><td>' + data.correct + '</td><td>' + data.wrong + '</td><td>' + rate + '%</td></tr>';
             });
         }
 
@@ -744,14 +679,7 @@ app.get('/api/check', (req, res) => {
             }
             sorted.forEach(([range, data]) => {
                 const rate = (data.correct / data.total * 100).toFixed(1);
-                tbody.innerHTML += `
-                    <tr>
-                        <td>${range}</td>
-                        <td>${data.total}</td>
-                        <td>${data.correct}</td>
-                        <td>${data.wrong}</td>
-                        <td>${rate}%</td>
-                    </tr>`;
+                tbody.innerHTML += '<tr><td>' + range + '</td><td>' + data.total + '</td><td>' + data.correct + '</td><td>' + data.wrong + '</td><td>' + rate + '%</td></tr>';
             });
         }
 
@@ -765,14 +693,7 @@ app.get('/api/check', (req, res) => {
             }
             sorted.forEach(([key, data]) => {
                 const rate = (data.correct / data.total * 100).toFixed(1);
-                tbody.innerHTML += `
-                    <tr>
-                        <td>${key}</td>
-                        <td>${data.total}</td>
-                        <td>${data.correct}</td>
-                        <td>${data.wrong}</td>
-                        <td>${rate}%</td>
-                    </tr>`;
+                tbody.innerHTML += '<tr><td>' + key + '</td><td>' + data.total + '</td><td>' + data.correct + '</td><td>' + data.wrong + '</td><td>' + rate + '%</td></tr>';
             });
         }
 
@@ -780,25 +701,10 @@ app.get('/api/check', (req, res) => {
         setInterval(fetchData, 2000);
     </script>
 </body>
-</html>
-    `);
-});
-
-// API JSON cho giao diện check
-app.get('/api/check/data', (req, res) => {
-    res.json({
-        recentHistory: detailedStats.recentHistory,
-        byPattern: detailedStats.byPattern,
-        byConfidence: detailedStats.byConfidence,
-        byPrediction: detailedStats.byPrediction,
-        summary: detailedStats.summary
-    });
-});
-
-// 404
-app.use((req, res) => {
-    res.status(404).json({ error: "Endpoint không tồn tại" });
-});
+</html>`;
+    fs.writeFileSync(checkHtmlPath, htmlContent, 'utf8');
+    console.log("[✅] Đã tạo file check.html");
+}
 
 // --------------- KHỞI ĐỘNG ---------------
 async function main() {
@@ -812,27 +718,13 @@ async function main() {
     console.log(`🔗 Keep-alive: ${SELF_URL}`);
     console.log("=".repeat(60));
 
-    // Kết nối WebSocket
     connectWebSocket();
-
-    // Khởi động Express
-    app.listen(PORT, () => {
-        console.log(`[🚀] Server sẵn sàng trên cổng ${PORT}`);
-    });
-
-    // Tự động ping chống ngủ
+    app.listen(PORT, () => console.log(`[🚀] Server sẵn sàng trên cổng ${PORT}`));
     keepAlive();
 }
 
-// Xử lý thoát
-process.on('SIGINT', () => {
-    console.log("\n[👋] Tắt server...");
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    console.log("\n[👋] Tắt server...");
-    process.exit(0);
-});
+process.on('SIGINT', () => { console.log("\n[👋] Tắt server..."); process.exit(0); });
+process.on('SIGTERM', () => { console.log("\n[👋] Tắt server..."); process.exit(0); });
 
 main().catch(err => {
     console.error(`[❌] Lỗi khởi động: ${err.message}`);
