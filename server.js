@@ -1,11 +1,11 @@
-const axios = require('axios');
+const express = require('express');
+const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const WebSocket = require('ws');
 
-// --- Cấu hình & Khởi tạo ---
-const API_URL = process.env.API_URL || "http://localhost:3000/api/tx"; // giữ lại fallback
+// ========== CONFIG ==========
+const PORT = process.env.PORT || 3000;                // Render cấp PORT
 const DATA_FILE = "collected_data/sunwin_tx.json";
 const STATS_FILE = "database/stats.json";
 const DETAILED_STATS_FILE = "database/detailed_stats.json";
@@ -13,20 +13,27 @@ const DETAILED_STATS_FILE = "database/detailed_stats.json";
 const MIN_DATA_FOR_PREDICTION = 10;
 const MAX_PREDICTIONS = 100000;
 const MAX_STORAGE = 1000000;
-const CHECK_INTERVAL = 5000; // không dùng nếu WebSocket hoạt động
 
+// ========== HELPER: THỜI GIAN VIỆT NAM ==========
 const vnNow = () => {
     const d = new Date();
-    return new Date(d.getTime() + (7 * 60 * 60 * 1000)).toISOString();
+    return new Date(d.getTime() + 7 * 60 * 60 * 1000).toISOString();
 };
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true
-});
+// ========== BIẾN TOÀN CỤC ==========
+let globalHistory = [];   // lưu tất cả phiên
 
-let globalHistory = [];
+let stats = {
+    total: 0, correct: 0, wrong: 0,
+    last_prediction: null,
+    start_time: vnNow(),
+    history: [],
+    total_predictions_made: 0,
+    prediction_started: false,
+    current_streak: 0,
+    best_streak: 0,
+    worst_streak: 0
+};
 
 let detailedStats = {
     byPattern: {
@@ -71,19 +78,7 @@ let detailedStats = {
     }
 };
 
-let stats = {
-    total: 0, correct: 0, wrong: 0,
-    last_prediction: null,
-    start_time: vnNow(),
-    history: [],
-    total_predictions_made: 0,
-    prediction_started: false,
-    current_streak: 0,
-    best_streak: 0,
-    worst_streak: 0
-};
-
-// ==================== LOGIC DỰ ĐOÁN (GIỮ NGUYÊN) ====================
+// ========== LOGIC DỰ ĐOÁN (KHÔNG THAY ĐỔI) ==========
 class TX_LogicPen_V4 {
     constructor() {
         this.error_streak = 0;
@@ -97,63 +92,51 @@ class TX_LogicPen_V4 {
     }
 
     _arr() {
-        return this.history.map(s => 
+        return this.history.map(s =>
             (s.ket_qua || '').toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI')
         );
     }
 
     _points() {
-        return this.history
-            .filter(s => s.tong !== undefined && s.tong !== null)
-            .map(s => s.tong);
+        return this.history.filter(s => s.tong != null).map(s => s.tong);
     }
 
     cauSap(arr) {
         if (arr.length < 2) return null;
         let length = 1;
         for (let i = 1; i < arr.length; i++) {
-            if (arr[i] === arr[0]) length++;
-            else break;
+            if (arr[i] === arr[0]) length++; else break;
         }
-        if (length >= 2 && length <= 5) {
+        if (length >= 2 && length <= 5)
             return { pred: arr[0], conf: 72, type: "Đu Bệt", reason: `Bệt ${length} phiên` };
-        }
-        if (length >= 6) {
+        if (length >= 6)
             return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 80, type: "Bẻ Bệt Rồng", reason: `Bệt dài ${length} → hồi` };
-        }
         return null;
     }
 
     cauNoi(arr) {
         if (arr.length < 5) return null;
-        for (let i = 0; i < 4; i++) {
-            if (arr[i] === arr[i + 1]) return null;
-        }
+        for (let i = 0; i < 4; i++) if (arr[i] === arr[i + 1]) return null;
         return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 82, type: "Cầu Nối 1-1", reason: "Nhịp 1-1 ổn định" };
     }
 
     cauDoi(arr) {
         if (arr.length < 4) return null;
-        if (arr[0] === arr[1] && arr[2] === arr[3] && arr[0] !== arr[2]) {
+        if (arr[0] === arr[1] && arr[2] === arr[3] && arr[0] !== arr[2])
             return { pred: arr[2], conf: 78, type: "Cầu 2-2", reason: "AABB → B" };
-        }
-        if (arr.length >= 6 && arr[0] === arr[1] && arr[1] === arr[2] && 
-            arr[3] === arr[4] && arr[4] === arr[5] && arr[0] !== arr[3]) {
+        if (arr.length >= 6 && arr[0] === arr[1] && arr[1] === arr[2] &&
+            arr[3] === arr[4] && arr[4] === arr[5] && arr[0] !== arr[3])
             return { pred: arr[3], conf: 80, type: "Cầu 3-3", reason: "AAABBB → B" };
-        }
         return null;
     }
 
     cauGay(arr) {
-        if (arr.length >= 5 && arr[0] === arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[3] === arr[4]) {
+        if (arr.length >= 5 && arr[0] === arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[3] === arr[4])
             return { pred: arr[3], conf: 74, type: "Gãy 3-2", reason: "AAABB → B" };
-        }
-        if (arr.length >= 5 && arr[0] === arr[1] && arr[1] !== arr[2] && arr[2] === arr[3] && arr[3] === arr[4]) {
+        if (arr.length >= 5 && arr[0] === arr[1] && arr[1] !== arr[2] && arr[2] === arr[3] && arr[3] === arr[4])
             return { pred: arr[2], conf: 74, type: "Gãy 2-3", reason: "AABBB → B" };
-        }
-        if (arr.length >= 4 && arr[0] !== arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[0] === arr[3]) {
+        if (arr.length >= 4 && arr[0] !== arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[0] === arr[3])
             return { pred: arr[1], conf: 72, type: "Gãy 1-2-1", reason: "ABBA → B" };
-        }
         return null;
     }
 
@@ -163,9 +146,8 @@ class TX_LogicPen_V4 {
             let pattern = arr.slice(0, len);
             for (let i = len; i < arr.length - len; i++) {
                 let sub = arr.slice(i, i + len);
-                if (JSON.stringify(sub) === JSON.stringify(pattern) && arr[i - 1]) {
+                if (JSON.stringify(sub) === JSON.stringify(pattern) && arr[i - 1])
                     return { pred: arr[i - 1], conf: 88, type: "Mẫu Lặp", reason: `Mẫu "${pattern.join(',')}"` };
-                }
             }
         }
         return null;
@@ -175,8 +157,7 @@ class TX_LogicPen_V4 {
         const points = this._points();
         if (points.length < 5) return null;
         const last = points[0], prev = points[1];
-        const slice = points.slice(0, 5);
-        const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
+        const avg = points.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
 
         if (last >= 15) return { pred: "XIU", conf: 75, type: "Vị cực đại", reason: `Điểm ${last} → hồi Xỉu` };
         if (last <= 5) return { pred: "TAI", conf: 75, type: "Vị cực tiểu", reason: `Điểm ${last} → hồi Tài` };
@@ -190,20 +171,15 @@ class TX_LogicPen_V4 {
     tongHopDuDoan() {
         const arr = this._arr();
         if (arr.length < 2) return null;
-        const result = this.phatHienMauLap(arr) || this.cauNoi(arr) || this.cauDoi(arr) ||
+        return this.phatHienMauLap(arr) || this.cauNoi(arr) || this.cauDoi(arr) ||
                this.cauGay(arr) || this.cauSap(arr) || this.duDoanVi() ||
                { pred: arr[0], conf: 55, type: "Theo", reason: "Bám phiên cuối" };
-        
-        if (result) {
-            this.last_pattern = result.type;
-        }
-        return result;
     }
 
     apDungDaoChieu(p) {
         if (!p || this.history.length < 1) return p;
-        const currentResult = this._arr()[0];
-        if (this.error_streak >= 2 && this.last_prediction && this.last_prediction !== currentResult) {
+        const current = this._arr()[0];
+        if (this.error_streak >= 2 && this.last_prediction && this.last_prediction !== current) {
             return {
                 ...p,
                 pred: p.pred === "TAI" ? "XIU" : "TAI",
@@ -216,81 +192,52 @@ class TX_LogicPen_V4 {
 
     predict(data) {
         this.loadData(data);
-        let result = this.tongHopDuDoan();
-        if (result) result = this.apDungDaoChieu(result);
-        else result = { pred: this._arr()[0] || "TAI", conf: 50, type: "Theo", reason: "Không đủ dữ liệu" };
-        
-        this.last_prediction = result.pred;
-        return result;
+        let res = this.tongHopDuDoan() || { pred: this._arr()[0] || "TAI", conf: 50, type: "Theo", reason: "Không đủ dữ liệu" };
+        res = this.apDungDaoChieu(res);
+        this.last_prediction = res.pred;
+        if (res.type) this.last_pattern = res.type;
+        return res;
     }
 
     updateStatus(actual) {
         if (this.last_prediction) {
             const a = actual.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
-            if (this.last_prediction === a) this.error_streak = 0;
-            else this.error_streak++;
+            this.error_streak = (this.last_prediction === a) ? 0 : this.error_streak + 1;
         }
     }
 }
 
 const predictor = new TX_LogicPen_V4();
 
-// ==================== HELPER FUNCTIONS (GIỮ NGUYÊN) ====================
+// ========== IO FILE ==========
 function loadHistory() {
     try {
         if (fs.existsSync(DATA_FILE)) {
-            const content = fs.readFileSync(DATA_FILE, 'utf-8');
-            const data = JSON.parse(content);
-            return data.history || [];
+            return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8')).history || [];
         }
-    } catch (e) {
-        console.error(`Lỗi đọc file: ${e.message}`);
-    }
+    } catch (e) { console.error("Lỗi load history:", e.message); }
     return [];
 }
 
 function loadDetailedStats() {
     try {
         if (fs.existsSync(DETAILED_STATS_FILE)) {
-            const content = fs.readFileSync(DETAILED_STATS_FILE, 'utf-8');
-            return JSON.parse(content);
+            return JSON.parse(fs.readFileSync(DETAILED_STATS_FILE, 'utf-8'));
         }
-    } catch (e) {
-        console.error(`Lỗi đọc file thống kê chi tiết: ${e.message}`);
-    }
+    } catch (e) {}
     return detailedStats;
-}
-
-function saveDetailedStats() {
-    const dir = path.dirname(DETAILED_STATS_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    
-    detailedStats.summary.totalPredictions = stats.total;
-    detailedStats.summary.totalCorrect = stats.correct;
-    detailedStats.summary.totalWrong = stats.wrong;
-    detailedStats.summary.accuracy = stats.total > 0 ? (stats.correct / stats.total * 100) : 0;
-    detailedStats.summary.bestStreak = stats.best_streak;
-    detailedStats.summary.worstStreak = stats.worst_streak;
-    detailedStats.summary.currentStreak = stats.current_streak;
-    detailedStats.summary.lastUpdated = vnNow();
-    
-    fs.writeFileSync(DETAILED_STATS_FILE, JSON.stringify(detailedStats, null, 2));
 }
 
 function saveHistory(history) {
     const dir = path.dirname(DATA_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    
-    const limitedHistory = history.slice(-MAX_STORAGE);
-    
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ 
-        history: limitedHistory,
-        total_sessions: limitedHistory.length,
+    const limited = history.slice(-MAX_STORAGE);
+    fs.writeFileSync(DATA_FILE, JSON.stringify({
+        history: limited,
+        total_sessions: limited.length,
         max_storage: MAX_STORAGE,
         last_updated: vnNow()
     }, null, 2));
-    
-    console.log(`💾 Đã lưu ${limitedHistory.length}/${MAX_STORAGE} phiên dữ liệu`);
 }
 
 function saveStatsFile() {
@@ -310,561 +257,367 @@ function saveStatsFile() {
     }, null, 2));
 }
 
+function saveDetailedStats() {
+    const dir = path.dirname(DETAILED_STATS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    detailedStats.summary = {
+        totalPredictions: stats.total,
+        totalCorrect: stats.correct,
+        totalWrong: stats.wrong,
+        accuracy: stats.total > 0 ? (stats.correct / stats.total * 100) : 0,
+        bestStreak: stats.best_streak,
+        worstStreak: stats.worst_streak,
+        currentStreak: stats.current_streak,
+        lastUpdated: vnNow()
+    };
+    fs.writeFileSync(DETAILED_STATS_FILE, JSON.stringify(detailedStats, null, 2));
+}
+
 function updateDetailedStats(prediction, actual, pattern, confidence, correct) {
     if (pattern && detailedStats.byPattern[pattern]) {
         detailedStats.byPattern[pattern].total++;
-        if (correct) detailedStats.byPattern[pattern].correct++;
-        else detailedStats.byPattern[pattern].wrong++;
+        correct ? detailedStats.byPattern[pattern].correct++ : detailedStats.byPattern[pattern].wrong++;
     }
-
-    let confRange = '0-50';
-    if (confidence > 50 && confidence <= 60) confRange = '51-60';
-    else if (confidence > 60 && confidence <= 70) confRange = '61-70';
-    else if (confidence > 70 && confidence <= 80) confRange = '71-80';
-    else if (confidence > 80 && confidence <= 90) confRange = '81-90';
-    else if (confidence > 90) confRange = '91-100';
-    
-    if (detailedStats.byConfidence[confRange]) {
-        detailedStats.byConfidence[confRange].total++;
-        if (correct) detailedStats.byConfidence[confRange].correct++;
-        else detailedStats.byConfidence[confRange].wrong++;
-    }
+    let range = '0-50';
+    if (confidence > 50 && confidence <= 60) range = '51-60';
+    else if (confidence > 60 && confidence <= 70) range = '61-70';
+    else if (confidence > 70 && confidence <= 80) range = '71-80';
+    else if (confidence > 80 && confidence <= 90) range = '81-90';
+    else if (confidence > 90) range = '91-100';
+    detailedStats.byConfidence[range].total++;
+    correct ? detailedStats.byConfidence[range].correct++ : detailedStats.byConfidence[range].wrong++;
 
     const predKey = prediction.toUpperCase();
-    if (detailedStats.byPrediction[predKey]) {
-        detailedStats.byPrediction[predKey].total++;
-        if (correct) detailedStats.byPrediction[predKey].correct++;
-        else detailedStats.byPrediction[predKey].wrong++;
-    }
+    detailedStats.byPrediction[predKey].total++;
+    correct ? detailedStats.byPrediction[predKey].correct++ : detailedStats.byPrediction[predKey].wrong++;
 
     detailedStats.recentHistory.push({
         phien: stats.last_prediction?.phien || 0,
-        prediction: prediction,
-        actual: actual,
-        pattern: pattern,
-        confidence: confidence,
-        correct: correct,
+        prediction, actual, pattern, confidence, correct,
         timestamp: vnNow()
     });
-    
-    if (detailedStats.recentHistory.length > 1000) {
-        detailedStats.recentHistory = detailedStats.recentHistory.slice(-1000);
-    }
-
+    if (detailedStats.recentHistory.length > 1000) detailedStats.recentHistory = detailedStats.recentHistory.slice(-1000);
     saveDetailedStats();
 }
 
-// ==================== CÁC HÀM XỬ LÝ LỆNH CONSOLE (GIỮ NGUYÊN) ====================
-function showPrediction(history) {
-    console.log('\n🎯 === DỰ ĐOÁN TIẾP THEO ===');
-    console.log('═══════════════════════════════════════════');
-    
-    if (!history || history.length < 5) {
-        console.log('❌ Chưa đủ dữ liệu để dự đoán (cần ít nhất 5 phiên)');
-        console.log(`📊 Hiện có: ${history ? history.length : 0} phiên`);
-        return;
-    }
-
-    try {
-        const r = predictor.predict(history);
-        const cur = history[history.length - 1];
-        let ph = cur.phien || 0;
-        if (typeof ph === 'string') {
-            const cleaned = ph.replace('#', '');
-            ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
-        }
-        const nextPhien = ph + 1;
-        
-        console.log(`📋 DỰA TRÊN ${history.length} PHIÊN GẦN NHẤT:`);
-        console.log(`\n🔮 DỰ ĐOÁN PHIÊN #${nextPhien}:`);
-        console.log(`   🎯 Kết quả: ${r.pred}`);
-        console.log(`   📊 Độ tin cậy: ${r.conf}%`);
-        console.log(`   📌 Loại cầu: ${r.type}`);
-        console.log(`   💬 Lý do: ${r.reason}`);
-        
-        console.log(`\n📜 10 PHIÊN GẦN NHẤT:`);
-        console.log('   ┌──────────┬────────────┬────────────┬─────────────┐');
-        console.log('   │ Phiên    │ Kết quả    │ Tổng điểm  │ Xúc xắc     │');
-        console.log('   ├──────────┼────────────┼────────────┼─────────────┤');
-        const recent = history.slice(-10).reverse();
-        for (const item of recent) {
-            const dice = `${item.xuc_xac_1||0},${item.xuc_xac_2||0},${item.xuc_xac_3||0}`;
-            console.log(`   │ ${String(item.phien).padStart(8)} │ ${(item.ket_qua || '').padEnd(10)} │ ${String(item.tong || 0).padStart(10)} │ ${dice.padEnd(11)} │`);
-        }
-        console.log('   └──────────┴────────────┴────────────┴─────────────┘');
-        
-        console.log('\n═══════════════════════════════════════════\n');
-        
-    } catch (e) {
-        console.error(`❌ Lỗi dự đoán: ${e.message}`);
-    }
-}
-
-function showHistory(history) {
-    console.log('\n📜 === LỊCH SỬ DỰ ĐOÁN ===');
-    console.log('═══════════════════════════════════════════');
-    
-    if (!detailedStats.recentHistory || detailedStats.recentHistory.length === 0) {
-        console.log('❌ Chưa có lịch sử dự đoán nào');
-        console.log('💡 Hãy đợi chương trình dự đoán và xác minh kết quả');
-        return;
-    }
-
-    const total = detailedStats.recentHistory.length;
-    console.log(`📊 Tổng số dự đoán đã lưu: ${total}`);
-    console.log(`📈 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(2)}% (${stats.correct}/${stats.total})`);
-    console.log(`🏆 Chuỗi đúng tốt nhất: ${stats.best_streak}`);
-    console.log(`📉 Chuỗi sai tệ nhất: ${stats.worst_streak}`);
-    console.log(`📊 Chuỗi đúng hiện tại: ${stats.current_streak}`);
-    
-    console.log(`\n📋 20 DỰ ĐOÁN GẦN NHẤT:`);
-    console.log('   ┌──────────┬────────────┬────────────┬──────────────────┬──────────┬────────────┐');
-    console.log('   │ Phiên    │ Dự đoán    │ Thực tế    │ Loại cầu         │ Kết quả  │ Độ tin cậy │');
-    console.log('   ├──────────┼────────────┼────────────┼──────────────────┼──────────┼────────────┤');
-    
-    const recent = detailedStats.recentHistory.slice(-20).reverse();
-    for (const item of recent) {
-        const result = item.correct ? '✅ ĐÚNG' : '❌ SAI';
-        console.log(`   │ ${String(item.phien).padStart(8)} │ ${(item.prediction || '').padEnd(10)} │ ${(item.actual || '').padEnd(10)} │ ${(item.pattern || '').padEnd(16)} │ ${result.padEnd(8)} │ ${String(item.confidence || 0).padEnd(10)}% │`);
-    }
-    console.log('   └──────────┴────────────┴────────────┴──────────────────┴──────────┴────────────┘');
-    
-    console.log(`\n📊 THỐNG KÊ THEO LOẠI CẦU (Top 5):`);
-    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
-    console.log('   │ Loại cầu             │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
-    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
-    
-    const sortedPatterns = Object.entries(detailedStats.byPattern)
-        .filter(([_, data]) => data.total > 0)
-        .sort((a, b) => b[1].total - a[1].total)
-        .slice(0, 5);
-    
-    for (const [pattern, data] of sortedPatterns) {
-        const rate = (data.correct / data.total * 100).toFixed(1);
-        console.log(`   │ ${pattern.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
-    }
-    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
-    
-    console.log('\n═══════════════════════════════════════════\n');
-}
-
-function printDetailedStats() {
-    console.log('\n📊 === THỐNG KÊ CHI TIẾT ===');
-    console.log('═══════════════════════════════════════════');
-    
-    console.log(`\n📈 TỔNG QUAN:`);
-    console.log(`   Tổng dự đoán: ${stats.total}`);
-    console.log(`   Đúng: ${stats.correct} (${stats.total > 0 ? (stats.correct/stats.total*100).toFixed(2) : 0}%)`);
-    console.log(`   Sai: ${stats.wrong} (${stats.total > 0 ? (stats.wrong/stats.total*100).toFixed(2) : 0}%)`);
-    console.log(`   Chuỗi đúng hiện tại: ${stats.current_streak}`);
-    console.log(`   Chuỗi đúng tốt nhất: ${stats.best_streak}`);
-    console.log(`   Chuỗi sai tệ nhất: ${stats.worst_streak}`);
-    
-    console.log(`\n📊 THỐNG KÊ THEO LOẠI CẦU:`);
-    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
-    console.log('   │ Loại cầu             │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
-    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
-    
-    const sortedPatterns = Object.entries(detailedStats.byPattern)
-        .filter(([_, data]) => data.total > 0)
-        .sort((a, b) => b[1].total - a[1].total);
-    
-    for (const [pattern, data] of sortedPatterns) {
-        const rate = (data.correct / data.total * 100).toFixed(1);
-        console.log(`   │ ${pattern.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
-    }
-    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
-    
-    console.log(`\n📊 THỐNG KÊ THEO ĐỘ TIN CẬY:`);
-    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
-    console.log('   │ Độ tin cậy          │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
-    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
-    
-    for (const [range, data] of Object.entries(detailedStats.byConfidence)) {
-        if (data.total > 0) {
-            const rate = (data.correct / data.total * 100).toFixed(1);
-            console.log(`   │ ${range.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
-        }
-    }
-    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
-    
-    console.log('\n═══════════════════════════════════════════\n');
-}
-
-function setupCommandHandler() {
-    console.log('\n💡 Gõ /dudoan để xem dự đoán');
-    console.log('💡 Gõ /lichsu để xem lịch sử');
-    console.log('💡 Gõ /help để xem hướng dẫn');
-    console.log('💡 Gõ /thoat để thoát chương trình\n');
-
-    rl.on('line', (input) => {
-        const cmd = input.trim().toLowerCase();
-        
-        switch(cmd) {
-            case '/dudoan':
-            case '/du doan':
-                showPrediction(globalHistory);
-                break;
-                
-            case '/lichsu':
-            case '/lich su':
-                showHistory(globalHistory);
-                break;
-                
-            case '/help':
-            case '/h':
-                console.log('\n📖 === HƯỚNG DẪN SỬ DỤNG ===');
-                console.log('═══════════════════════════════════════════');
-                console.log('  /dudoan   - Xem dự đoán phiên tiếp theo');
-                console.log('  /lichsu   - Xem lịch sử dự đoán gần đây');
-                console.log('  /stats    - Xem thống kê chi tiết');
-                console.log('  /help     - Hiển thị hướng dẫn này');
-                console.log('  /thoat    - Thoát chương trình');
-                console.log('═══════════════════════════════════════════\n');
-                break;
-                
-            case '/stats':
-            case '/thongke':
-                printDetailedStats();
-                break;
-                
-            case '/thoat':
-            case '/exit':
-            case '/quit':
-                console.log('\n🛑 Đang dừng chương trình...');
-                saveStatsFile();
-                saveDetailedStats();
-                console.log('✅ Đã lưu thống kê!');
-                rl.close();
-                process.exit(0);
-                break;
-                
-            default:
-                if (cmd && !cmd.startsWith('/')) {
-                    console.log(`❌ Lệnh không hợp lệ: "${cmd}"`);
-                    console.log('💡 Gõ /help để xem danh sách lệnh');
-                }
-                break;
-        }
-    });
-}
-
+// ========== AUTO VERIFY & PREDICT (GIỮ NGUYÊN LOGIC) ==========
 function autoVerify(history) {
-    if (stats.last_prediction && history.length > 0) {
-        const lp = stats.last_prediction;
-        const latest = history[history.length - 1];
-        
-        if (latest.phien === lp.phien) {
-            const actual = latest.ket_qua || '';
-            if (actual) {
-                stats.total++;
-                const a = actual.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
-                const p = lp.prediction.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
-                const ok = p === a;
+    if (!stats.last_prediction || history.length === 0) return;
+    const lp = stats.last_prediction;
+    const latest = history[history.length - 1];
+    if (latest.phien !== lp.phien) return;
 
-                if (ok) {
-                    stats.correct++;
-                    stats.current_streak++;
-                    if (stats.current_streak > stats.best_streak) {
-                        stats.best_streak = stats.current_streak;
-                    }
-                } else {
-                    stats.wrong++;
-                    stats.current_streak = 0;
-                    let wrongStreak = 0;
-                    for (let i = stats.history.length - 1; i >= 0; i--) {
-                        if (!stats.history[i].correct) wrongStreak++;
-                        else break;
-                    }
-                    if (wrongStreak > stats.worst_streak) {
-                        stats.worst_streak = wrongStreak;
-                    }
-                }
+    const actual = latest.ket_qua || '';
+    if (!actual) return;
 
-                predictor.updateStatus(actual);
-                
-                const historyEntry = {
-                    phien: latest.phien,
-                    prediction: lp.prediction,
-                    actual: actual,
-                    confidence: lp.confidence,
-                    pattern: lp.pattern || 'Unknown',
-                    correct: ok,
-                    timestamp: vnNow()
-                };
-                
-                stats.history.push(historyEntry);
-                if (stats.history.length > 500) stats.history = stats.history.slice(-500);
-                
-                updateDetailedStats(
-                    lp.prediction,
-                    actual,
-                    lp.pattern || 'Unknown',
-                    lp.confidence,
-                    ok
-                );
-                
-                const acc = ((stats.correct / Math.max(stats.total, 1)) * 100).toFixed(1);
-                console.log(`🔍 VERIFY #${latest.phien}: ${ok ? '✅ ĐÚNG' : '❌ SAI'} | Tỷ lệ: ${acc}% (${stats.correct}/${stats.total}) | Streak: ${stats.current_streak}`);
-                
-                stats.last_prediction = null;
-                saveStatsFile();
-            }
+    stats.total++;
+    const a = actual.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
+    const p = lp.prediction.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
+    const ok = p === a;
+
+    if (ok) {
+        stats.correct++;
+        stats.current_streak++;
+        if (stats.current_streak > stats.best_streak) stats.best_streak = stats.current_streak;
+    } else {
+        stats.wrong++;
+        stats.current_streak = 0;
+        let wrongCount = 0;
+        for (let i = stats.history.length - 1; i >= 0; i--) {
+            if (!stats.history[i].correct) wrongCount++; else break;
         }
+        if (wrongCount > stats.worst_streak) stats.worst_streak = wrongCount;
     }
+
+    predictor.updateStatus(actual);
+
+    stats.history.push({
+        phien: latest.phien,
+        prediction: lp.prediction,
+        actual,
+        confidence: lp.confidence,
+        pattern: lp.pattern || 'Unknown',
+        correct: ok,
+        timestamp: vnNow()
+    });
+    if (stats.history.length > 500) stats.history = stats.history.slice(-500);
+
+    updateDetailedStats(lp.prediction, actual, lp.pattern || 'Unknown', lp.confidence, ok);
+
+    const acc = (stats.correct / Math.max(stats.total, 1) * 100).toFixed(1);
+    console.log(`🔍 VERIFY #${latest.phien}: ${ok ? '✅ ĐÚNG' : '❌ SAI'} | Tỷ lệ: ${acc}% (${stats.correct}/${stats.total}) | Streak: ${stats.current_streak}`);
+
+    stats.last_prediction = null;
+    saveStatsFile();
 }
 
 function autoPredict(history) {
     if (!stats.prediction_started) {
         if (history.length >= MIN_DATA_FOR_PREDICTION) {
             stats.prediction_started = true;
-            console.log(`\n🎉 ĐÃ ĐỦ ${MIN_DATA_FOR_PREDICTION} PHIÊN DỮ LIỆU! BẮT ĐẦU DỰ ĐOÁN...\n`);
+            console.log(`\n🎉 ĐÃ ĐỦ ${MIN_DATA_FOR_PREDICTION} PHIÊN! BẮT ĐẦU DỰ ĐOÁN...\n`);
         } else {
-            const remaining = MIN_DATA_FOR_PREDICTION - history.length;
-            console.log(`⏳ Đang thu thập dữ liệu: ${history.length}/${MIN_DATA_FOR_PREDICTION} phiên. Cần thêm ${remaining} phiên nữa để bắt đầu dự đoán.`);
+            console.log(`⏳ Thu thập: ${history.length}/${MIN_DATA_FOR_PREDICTION}`);
             return;
         }
     }
-    
     if (stats.total_predictions_made >= MAX_PREDICTIONS) {
-        console.log(`🏁 Đã đạt giới hạn ${MAX_PREDICTIONS} dự đoán. Ngừng dự đoán mới.`);
+        console.log(`🏁 Đã đạt giới hạn ${MAX_PREDICTIONS} dự đoán.`);
         return;
     }
-    
-    if (history.length >= 5) {
-        try {
-            const r = predictor.predict(history);
-            const cur = history[history.length - 1];
-            let ph = cur.phien || 0;
-            if (typeof ph === 'string') {
-                const cleaned = ph.replace('#', '');
-                ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
-            }
-            
-            const nextPhien = ph + 1;
-            stats.last_prediction = { 
-                phien: nextPhien, 
-                prediction: r.pred, 
-                confidence: r.conf,
-                pattern: r.type
-            };
-            stats.total_predictions_made++;
-            
-            const remaining = MAX_PREDICTIONS - stats.total_predictions_made;
-            console.log(`🎯 DỰ ĐOÁN #${nextPhien}: ${r.pred} | Độ tin cậy: ${r.conf}% | ${r.type} | Còn: ${remaining}/${MAX_PREDICTIONS}`);
-            
-            saveStatsFile();
-        } catch (e) {
-            console.error(`Lỗi dự đoán: ${e.message}`);
-        }
-    }
+    if (history.length < 5) return;
+
+    const r = predictor.predict(history);
+    const cur = history[history.length - 1];
+    let ph = cur.phien || 0;
+    if (typeof ph === 'string') ph = parseInt(ph.replace('#', '')) || 0;
+    const nextPhien = ph + 1;
+
+    stats.last_prediction = {
+        phien: nextPhien,
+        prediction: r.pred,
+        confidence: r.conf,
+        pattern: r.type
+    };
+    stats.total_predictions_made++;
+    const remaining = MAX_PREDICTIONS - stats.total_predictions_made;
+    console.log(`🎯 DỰ ĐOÁN #${nextPhien}: ${r.pred} | Độ tin cậy: ${r.conf}% | ${r.type} | Còn: ${remaining}/${MAX_PREDICTIONS}`);
+    saveStatsFile();
 }
 
-function safeInt(v, d = 0) {
-    const parsed = parseInt(v);
-    return isNaN(parsed) ? d : parsed;
-}
-
-// ==================== WEBSOCKET CLIENT (CHUYỂN TỪ PYTHON) ====================
-function loadToken() {
+// ========== WEBSOCKET CLIENT (LẤY DỮ LIỆU SUN.WIN) ==========
+function loadTokenFromFile() {
     try {
         if (fs.existsSync('token.txt')) {
-            const raw = fs.readFileSync('token.txt', 'utf8').trim();
-            // Tìm JSON chứa ipAddress (giống Python)
-            const jsonMatch = raw.match(/\{[^{}]*"ipAddress"[^{}]*\}/);
-            if (jsonMatch) {
-                return JSON.parse(jsonMatch[0]);
-            }
+            const raw = fs.readFileSync('token.txt', 'utf8');
+            const match = raw.match(/\{[^{}]*"ipAddress"[^{}]*\}/);
+            if (match) return JSON.parse(match[0]);
         }
-    } catch (e) {
-        console.error("Lỗi load token.txt:", e.message);
-    }
+    } catch (e) {}
     return null;
 }
 
-function connectWebSocket() {
-    const TOKEN_DATA = loadToken();
-    if (!TOKEN_DATA) {
-        console.error("❌ Không thể load token, thoát...");
-        process.exit(1);
+function connectSunWebSocket() {
+    const tokenData = loadTokenFromFile();
+    if (!tokenData || !tokenData.wsToken) {
+        console.error("❌ Không tìm thấy token hợp lệ trong token.txt");
+        return;
     }
 
-    const wsToken = TOKEN_DATA.wsToken;
-    const WS_URL = `wss://websocket.azhkthg1.net/websocket?token=${wsToken}`;
-    console.log(`🔌 Đang kết nối WebSocket đến Sun.Win...`);
-    
+    const WS_URL = `wss://websocket.azhkthg1.net/websocket?token=${tokenData.wsToken}`;
+    console.log(`🔌 Kết nối WebSocket: ${WS_URL}`);
+
     const ws = new WebSocket(WS_URL, {
         headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0",
             "Origin": "https://play.sun.pw"
         }
     });
 
     ws.on('open', () => {
-        console.log('[✅] WebSocket connected');
-        // Gửi initial messages (giống Python)
-        const initialMsgs = [
-            [
-                1,
-                "MiniGame",
-                TOKEN_DATA.username || "GM_quapotjz",
-                "quapit",
-                {
-                    signature: "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69",
-                    expireIn: TOKEN_DATA.timestamp || 1774138177205,
-                    wsToken: wsToken,
-                    accessToken: "7e9a9ecbff1b4a6393b48346f6d8b709",
-                    message: "Thành công",
-                    refreshToken: TOKEN_DATA.refreshToken || "",
-                    info: TOKEN_DATA
-                }
-            ],
+        console.log("✅ WebSocket đã kết nối đến Sun.Win");
+        const messages = [
+            [1, "MiniGame", tokenData.username || "GM_quapotjz", "quapit", {
+                signature: "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69",
+                expireIn: tokenData.timestamp || 1774138177205,
+                wsToken: tokenData.wsToken,
+                accessToken: "7e9a9ecbff1b4a6393b48346f6d8b709",
+                message: "Thành công",
+                refreshToken: tokenData.refreshToken || "",
+                info: tokenData
+            }],
             [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }],
             [6, "MiniGame", "lobbyPlugin", { cmd: 10001 }]
         ];
-
-        initialMsgs.forEach((msg, i) => {
-            setTimeout(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify(msg));
-                }
-            }, i * 600);
-        });
+        messages.forEach((msg, i) => setTimeout(() => ws.send(JSON.stringify(msg)), i * 600));
     });
 
     ws.on('message', (data) => {
         try {
-            const message = JSON.parse(data);
-            if (!Array.isArray(message) || message.length < 2) return;
-            
-            const body = message[1];
-            if (typeof body === 'object' && body !== null) {
-                // cmd 1003: kết quả xúc xắc
-                if (body.cmd === 1003 && body.gBB) {
-                    const d1 = body.d1;
-                    const d2 = body.d2;
-                    const d3 = body.d3;
-                    if (d1 === undefined || d2 === undefined || d3 === undefined) return;
+            const msg = JSON.parse(data);
+            if (!Array.isArray(msg) || msg.length < 2) return;
+            const body = msg[1];
+            if (typeof body !== 'object' || !body) return;
 
-                    const total = d1 + d2 + d3;
-                    const result = total > 10 ? "Tài" : "Xỉu";
-                    
-                    // Sử dụng sid nếu có, nếu không tự tăng
-                    const phien = body.sid || (globalHistory.length > 0 ? globalHistory[globalHistory.length - 1].phien + 1 : 1);
-                    
-                    const sessionData = {
-                        phien: phien,
-                        xuc_xac_1: d1,
-                        xuc_xac_2: d2,
-                        xuc_xac_3: d3,
-                        tong: total,
-                        ket_qua: result,
-                        thoi_gian: vnNow()
-                    };
+            if (body.cmd === 1003 && body.gBB) {
+                const d1 = body.d1, d2 = body.d2, d3 = body.d3;
+                if (d1 == null || d2 == null || d3 == null) return;
+                const total = d1 + d2 + d3;
+                const result = total > 10 ? "Tài" : "Xỉu";
+                const phien = body.sid || (globalHistory.length ? globalHistory[globalHistory.length - 1].phien + 1 : 1);
 
-                    console.log(`[🎲] Phiên ${sessionData.phien}: ${d1}-${d2}-${d3} = ${total} (${result}) - ${sessionData.thoi_gian}`);
+                const newSession = {
+                    phien,
+                    xuc_xac_1: d1,
+                    xuc_xac_2: d2,
+                    xuc_xac_3: d3,
+                    tong: total,
+                    ket_qua: result,
+                    thoi_gian: vnNow()
+                };
 
-                    // Thêm vào globalHistory (giữ nguyên cách thức như code gốc)
-                    const existing = globalHistory.find(h => h.phien === sessionData.phien);
-                    if (!existing) {
-                        globalHistory.push(sessionData);
-                        globalHistory.sort((a, b) => a.phien - b.phien);
-                        if (globalHistory.length > MAX_STORAGE) {
-                            globalHistory = globalHistory.slice(-MAX_STORAGE);
-                        }
-                        saveHistory(globalHistory);
-                        
-                        // Tự động verify và predict (giống code gốc)
-                        autoVerify(globalHistory);
-                        autoPredict(globalHistory);
-                    }
+                const exists = globalHistory.some(h => h.phien === phien);
+                if (!exists) {
+                    globalHistory.push(newSession);
+                    globalHistory.sort((a, b) => a.phien - b.phien);
+                    if (globalHistory.length > MAX_STORAGE) globalHistory = globalHistory.slice(-MAX_STORAGE);
+                    saveHistory(globalHistory);
+                    console.log(`🎲 Phiên ${phien}: ${d1}-${d2}-${d3} = ${total} (${result})`);
+                    autoVerify(globalHistory);
+                    autoPredict(globalHistory);
                 }
-                // cmd 1008: phiên mới bắt đầu (có thể lưu sid để dùng sau)
-                else if (body.cmd === 1008 && body.sid) {
-                    console.log(`[🎮] Phiên mới: ${body.sid}`);
-                    // Có thể dùng để cập nhật session hiện tại
-                }
+            } else if (body.cmd === 1008 && body.sid) {
+                console.log(`[🎮] Phiên mới #${body.sid}`);
             }
         } catch (e) {
-            console.error("Lỗi parse WS message:", e.message);
+            console.error("Lỗi xử lý WS message:", e.message);
         }
     });
 
     ws.on('close', () => {
-        console.log('[⚠️] WebSocket disconnected, reconnect sau 2.5s...');
-        setTimeout(connectWebSocket, 2500);
+        console.log("⚠️ WebSocket mất kết nối, thử lại sau 3s...");
+        setTimeout(connectSunWebSocket, 3000);
     });
 
     ws.on('error', (err) => {
-        console.error('[❌] WebSocket error:', err.message);
+        console.error("❌ WebSocket error:", err.message);
     });
 }
 
-// ==================== MAIN COLLECTOR (GIỮ NGUYÊN CẤU TRÚC) ====================
-async function collect() {
-    console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
-    console.log("═══════════════════════════════════════════");
-    console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION.toLocaleString()} phiên`);
-    console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
-    console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
-    console.log(`🔗 API: ${API_URL}`); // giữ lại nhưng không dùng
-    console.log("═══════════════════════════════════════════\n");
+// ========== EXPRESS SERVER & API ==========
+const app = express();
+app.use(express.json());
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    next();
+});
 
-    // Tải dữ liệu hiện có
-    let history = loadHistory();
-    globalHistory = history;
-    console.log(`📚 Đã tải ${history.length.toLocaleString()} phiên dữ liệu hiện có`);
-    
-    // Tải thống kê chi tiết
+// Trang chủ
+app.get('/', (req, res) => {
+    res.json({
+        name: "Sun.Win Tài Xỉu Collector & Predictor",
+        version: "1.0.0",
+        endpoints: {
+            "/api/tx": "Kết quả mới nhất",
+            "/api/dudoan": "Dự đoán tiếp theo",
+            "/api/lichsu": "Lịch sử dự đoán gần đây (50)",
+            "/api/thongke": "Thống kê tổng hợp",
+            "/api/stats": "Thống kê chi tiết đầy đủ"
+        },
+        current_time: vnNow()
+    });
+});
+
+// API kết quả mới nhất
+app.get('/api/tx', (req, res) => {
+    const latest = globalHistory.length ? globalHistory[globalHistory.length - 1] : null;
+    res.json(latest || { message: "Chưa có dữ liệu" });
+});
+
+// API dự đoán
+app.get('/api/dudoan', (req, res) => {
+    if (globalHistory.length < 5) {
+        return res.status(400).json({ error: "Cần ít nhất 5 phiên để dự đoán", current_count: globalHistory.length });
+    }
+    const r = predictor.predict(globalHistory);
+    const cur = globalHistory[globalHistory.length - 1];
+    let nextPhien = (cur.phien || 0) + 1;
+    res.json({
+        next_phien: nextPhien,
+        prediction: r.pred,
+        confidence: r.conf,
+        pattern: r.type,
+        reason: r.reason,
+        timestamp: vnNow()
+    });
+});
+
+// API lịch sử
+app.get('/api/lichsu', (req, res) => {
+    const recent = detailedStats.recentHistory.slice(-50).reverse();
+    res.json({
+        total_predictions: detailedStats.recentHistory.length,
+        history: recent,
+        summary: detailedStats.summary
+    });
+});
+
+// API thống kê tổng
+app.get('/api/thongke', (req, res) => {
+    res.json({
+        total: stats.total,
+        correct: stats.correct,
+        wrong: stats.wrong,
+        accuracy: stats.total > 0 ? (stats.correct / stats.total * 100).toFixed(2) + '%' : '0%',
+        current_streak: stats.current_streak,
+        best_streak: stats.best_streak,
+        worst_streak: stats.worst_streak,
+        prediction_started: stats.prediction_started,
+        total_predictions_made: stats.total_predictions_made,
+        last_updated: vnNow()
+    });
+});
+
+// API thống kê chi tiết
+app.get('/api/stats', (req, res) => {
+    res.json(detailedStats);
+});
+
+// ========== KHỞI ĐỘNG HỆ THỐNG ==========
+function init() {
+    // Load dữ liệu cũ
+    globalHistory = loadHistory();
     detailedStats = loadDetailedStats();
-    
-    // Khôi phục stats
-    try {
-        if (fs.existsSync(STATS_FILE)) {
-            const savedStats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf-8'));
-            stats = { ...stats, ...savedStats };
-            if (stats.prediction_started) {
-                console.log(`📈 Đã dự đoán ${stats.total_predictions_made.toLocaleString()}/${MAX_PREDICTIONS.toLocaleString()} phiên`);
-                console.log(`📊 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(1)}% (${stats.correct}/${stats.total})`);
-                console.log(`📈 Chuỗi đúng hiện tại: ${stats.current_streak}`);
-                console.log(`🏆 Chuỗi đúng tốt nhất: ${stats.best_streak}\n`);
-            }
-        }
-    } catch (e) {}
-    
-    // Setup command handler
-    setupCommandHandler();
-    
-    // Bắt đầu WebSocket client (thay cho vòng lặp gọi API)
-    connectWebSocket();
+    if (fs.existsSync(STATS_FILE)) {
+        try {
+            const saved = JSON.parse(fs.readFileSync(STATS_FILE, 'utf-8'));
+            stats = { ...stats, ...saved };
+        } catch (e) {}
+    }
+    console.log(`📚 Đã tải ${globalHistory.length} phiên lịch sử`);
+    if (stats.prediction_started) {
+        console.log(`📈 Tỷ lệ đúng: ${stats.total ? (stats.correct / stats.total * 100).toFixed(1) : 0}% (${stats.correct}/${stats.total})`);
+    }
 
-    // Fallback: nếu sau 30s không có phiên mới, có thể dùng API cũ (tùy chọn)
-    // Nhưng ở đây không cần, vì WebSocket real-time.
+    // Mở WebSocket lấy dữ liệu real-time
+    connectSunWebSocket();
+
+    // Mở Express server (Render bắt buộc)
+    app.listen(PORT, () => {
+        console.log(`\n🌐 Server API đang chạy tại http://localhost:${PORT}`);
+        console.log(`📡 Cổng ${PORT} đã mở - sẵn sàng deploy`);
+    });
+
+    // Console readline (vẫn giữ để test local)
+    console.log('\n💡 Gõ /dudoan, /lichsu, /stats, /help, /thoat');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.on('line', (input) => {
+        const cmd = input.trim().toLowerCase();
+        if (cmd === '/dudoan' || cmd === '/du doan') {
+            const r = predictor.predict(globalHistory);
+            console.log(`Dự đoán: ${r.pred} (${r.conf}%) - ${r.type}`);
+        } else if (cmd === '/lichsu' || cmd === '/lich su') {
+            console.table(detailedStats.recentHistory.slice(-10));
+        } else if (cmd === '/stats') {
+            console.log(`Đúng: ${stats.correct}, Sai: ${stats.wrong}, Streak: ${stats.current_streak}`);
+        } else if (cmd === '/help') {
+            console.log('/dudoan, /lichsu, /stats, /thoat');
+        } else if (cmd === '/thoat') {
+            process.exit(0);
+        }
+    });
 }
 
-// Xử lý tắt chương trình
+// Xử lý thoát an toàn
 process.on('SIGINT', () => {
-    console.log("\n🛑 Đang dừng chương trình...");
-    printDetailedStats();
     saveStatsFile();
     saveDetailedStats();
-    console.log("✅ Đã lưu thống kê!");
-    rl.close();
-    process.exit();
+    process.exit(0);
 });
-
 process.on('SIGTERM', () => {
-    console.log("\n🛑 Đang dừng chương trình...");
     saveStatsFile();
     saveDetailedStats();
-    console.log("✅ Đã lưu thống kê!");
-    rl.close();
-    process.exit();
+    process.exit(0);
 });
 
-process.on('unhandledRejection', (error) => {
-    console.error('❌ Unhandled Rejection:', error);
-});
-
-// Chạy Collector
-collect().catch(console.error);
+init();
