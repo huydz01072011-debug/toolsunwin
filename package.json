@@ -1,31 +1,16 @@
 {
-  "name": "HuyDaiXuVn",
-  "version": "1.0.0",
-  "description": "Sun.Win Tài Xỉu Data Stream - WebSocket, dự đoán và API (HuyDaiXuVn)",
+  "name": "sunwin-tx-stream",
+  "version": "2.0.0",
+  "description": "Sun.Win Tài Xỉu Data Stream - VIP Node.js",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.js"
   },
-  "keywords": [
-    "sunwin",
-    "taixiu",
-    "websocket",
-    "prediction",
-    "express"
-  ],
-  "author": "HuyDaiXuVn",
+  "author": "HuyDaiXuVN",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.7.2",
+    "express": "^4.18.2",
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "ws": "^8.17.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.4"
-  },
-  "engines": {
-    "node": ">=16.0.0"
+    "ws": "^8.13.0"
   }
 }
