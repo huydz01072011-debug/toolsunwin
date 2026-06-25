@@ -7,7 +7,6 @@
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": ["sunwin", "taixiu", "predictor", "websocket", "express"],
   "author": "HuyDaiXuVN",
   "license": "MIT",
   "dependencies": {
