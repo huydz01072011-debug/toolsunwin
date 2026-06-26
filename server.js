@@ -1,7 +1,7 @@
 // =============================================
 //  Sun.Win Tài Xỉu Data Stream - FULL CODE Node.js
 //  Tác giả: HuyDaiXuVN
-//  Phiên bản: Final
+//  Phiên bản: Final (đã sửa lỗi template literal)
 // =============================================
 
 const express = require('express');
@@ -425,7 +425,7 @@ app.get('/api/dudoan', (req, res) => {
 app.get('/api/check', (req, res) => {
     const checkHtmlPath = path.join(__dirname, 'check.html');
     if (!fs.existsSync(checkHtmlPath)) {
-        const html = `<!DOCTYPE html>
+        const htmlContent = `<!DOCTYPE html>
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
@@ -456,32 +456,39 @@ app.get('/api/check', (req, res) => {
 
     <script>
         async function fetchData() {
-            const res = await fetch('/api/check/data');
-            const data = await res.json();
-            document.getElementById('total').textContent = data.summary.total;
-            document.getElementById('correct').textContent = data.summary.correct;
-            document.getElementById('wrong').textContent = data.summary.wrong;
-            document.getElementById('accuracy').textContent = (data.summary.total > 0 ? (data.summary.correct / data.summary.total * 100).toFixed(1) : 0) + '%';
-            const tbody = document.getElementById('tbody');
-            tbody.innerHTML = '';
-            [...data.recentHistory].reverse().forEach(item => {
-                tbody.innerHTML += `<tr>
-                    <td>${item.phien||''}</td>
-                    <td>${item.prediction||''}</td>
-                    <td>${item.actual||''}</td>
-                    <td class="${item.correct?'correct':'wrong'}">${item.correct?'✅ Đúng':'❌ Sai'}</td>
-                    <td>${item.conf||''}%</td>
-                    <td>${item.type||''}</td>
-                    <td>${item.timestamp||''}</td>
-                </tr>`;
-            });
+            try {
+                const res = await fetch('/api/check/data');
+                const data = await res.json();
+                document.getElementById('total').textContent = data.summary.total;
+                document.getElementById('correct').textContent = data.summary.correct;
+                document.getElementById('wrong').textContent = data.summary.wrong;
+                document.getElementById('accuracy').textContent = (data.summary.total > 0 ? (data.summary.correct / data.summary.total * 100).toFixed(1) : 0) + '%';
+
+                const tbody = document.getElementById('tbody');
+                tbody.innerHTML = '';
+                const history = [...data.recentHistory].reverse();
+                history.forEach(item => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = 
+                        '<td>' + (item.phien || '') + '</td>' +
+                        '<td>' + (item.prediction || '') + '</td>' +
+                        '<td>' + (item.actual || '') + '</td>' +
+                        '<td class="' + (item.correct ? 'correct' : 'wrong') + '">' + (item.correct ? '✅ Đúng' : '❌ Sai') + '</td>' +
+                        '<td>' + (item.conf || '') + '%</td>' +
+                        '<td>' + (item.type || '') + '</td>' +
+                        '<td>' + (item.timestamp || '') + '</td>';
+                    tbody.appendChild(row);
+                });
+            } catch (e) {
+                console.error('Lỗi fetch:', e);
+            }
         }
         fetchData();
         setInterval(fetchData, 2000);
     </script>
 </body>
 </html>`;
-        fs.writeFileSync(checkHtmlPath, html, 'utf8');
+        fs.writeFileSync(checkHtmlPath, htmlContent, 'utf8');
     }
     res.sendFile(checkHtmlPath);
 });
