@@ -1,7 +1,7 @@
 // =============================================
-//  Sun.Win Tài Xỉu Data Stream - SIÊU VIP Node.js
+//  Sun.Win Tài Xỉu Data Stream - FULL CODE Node.js
 //  Tác giả: HuyDaiXuVN
-//  Phiên bản: 3.0 AI
+//  Phiên bản: Final
 // =============================================
 
 const express = require('express');
@@ -11,7 +11,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-// --------------- TOKEN GỘP TRỰC TIẾP ---------------
+// --------------- TOKEN GỘP CỨNG ---------------
 const TOKEN_DATA = {
     ipAddress: "1.55.124.245",
     wsToken: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0",
@@ -23,7 +23,7 @@ const TOKEN_DATA = {
     signature: "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69"
 };
 
-// WebSocket URL & headers
+// --------------- WEBSOCKET CONFIG ---------------
 const WS_URL = `wss://websocket.azhkthg1.net/websocket?token=${TOKEN_DATA.wsToken}`;
 const WS_OPTIONS = {
     headers: {
@@ -32,7 +32,6 @@ const WS_OPTIONS = {
     }
 };
 
-// Tin nhắn khởi tạo (giống Python gốc)
 const initialMessages = [
     [
         1,
@@ -73,18 +72,19 @@ let currentResult = {
 let currentSessionId = null;
 const MAX_HISTORY = 1000000;
 const history = [];
+const pendingPredictions = [];
+const checkedPredictions = [];
 
-// ==================== THUẬT TOÁN SIÊU VIP AI (HỌC TỪ LỊCH SỬ) ====================
+// --------------- THUẬT TOÁN AI (ĐẦY ĐỦ) ---------------
 class TX_LogicPen_AI_V5 {
     constructor() {
         this.error_streak = 0;
         this.last_prediction = null;
         this.history = [];
         this.last_pattern = null;
-        // AI tự học: lưu trữ thống kê thành công của từng pattern trong 50 lần gần nhất
-        this.patternMemory = {};    // { patternName: { success: number, fail: number } }
-        this.memorySize = 50;       // số lần gần nhất để tính tỉ lệ
-        this.recentPatterns = [];   // lưu các pattern đã dùng (để giới hạn memory)
+        this.patternMemory = {};
+        this.memorySize = 50;
+        this.recentPatterns = [];
     }
 
     loadData(data) {
@@ -92,7 +92,7 @@ class TX_LogicPen_AI_V5 {
     }
 
     _arr() {
-        return this.history.map(s => 
+        return this.history.map(s =>
             (s.ket_qua || '').toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI')
         );
     }
@@ -103,7 +103,6 @@ class TX_LogicPen_AI_V5 {
             .map(s => s.tong);
     }
 
-    // Các phương thức bắt cầu (giữ nguyên logic)
     cauSap(arr) {
         if (arr.length < 2) return null;
         let length = 1;
@@ -133,7 +132,7 @@ class TX_LogicPen_AI_V5 {
         if (arr[0] === arr[1] && arr[2] === arr[3] && arr[0] !== arr[2]) {
             return { pred: arr[2], conf: 78, type: "Cầu 2-2", reason: "AABB → B" };
         }
-        if (arr.length >= 6 && arr[0] === arr[1] && arr[1] === arr[2] && 
+        if (arr.length >= 6 && arr[0] === arr[1] && arr[1] === arr[2] &&
             arr[3] === arr[4] && arr[4] === arr[5] && arr[0] !== arr[3]) {
             return { pred: arr[3], conf: 80, type: "Cầu 3-3", reason: "AAABBB → B" };
         }
@@ -189,24 +188,16 @@ class TX_LogicPen_AI_V5 {
         const result = this.phatHienMauLap(arr) || this.cauNoi(arr) || this.cauDoi(arr) ||
                this.cauGay(arr) || this.cauSap(arr) || this.duDoanVi() ||
                { pred: arr[0], conf: 55, type: "Theo", reason: "Bám phiên cuối" };
-        
-        if (result) {
-            this.last_pattern = result.type;
-        }
+        if (result) this.last_pattern = result.type;
         return result;
     }
 
-    // AI tự học: áp dụng đảo chiều dựa trên lịch sử pattern
     aiDaoChieu(p) {
         if (!p || !this.last_pattern) return p;
-
-        const patternStats = this.patternMemory[this.last_pattern];
-        if (!patternStats || patternStats.total === 0) return p;
-
-        const failRate = patternStats.fail / patternStats.total;
-        const successRate = patternStats.success / patternStats.total;
-
-        // Nếu pattern này đang thất bại >60% => đảo ngược dự đoán
+        const mem = this.patternMemory[this.last_pattern];
+        if (!mem || mem.total === 0) return p;
+        const failRate = mem.fail / mem.total;
+        const successRate = mem.success / mem.total;
         if (failRate > 0.6) {
             return {
                 ...p,
@@ -215,8 +206,6 @@ class TX_LogicPen_AI_V5 {
                 reason: `🤖 AI đảo (${this.last_pattern} thất bại ${(failRate*100).toFixed(0)}%)`
             };
         }
-        
-        // Nếu pattern này đang rất thành công >85% => tăng độ tin cậy
         if (successRate > 0.85) {
             return {
                 ...p,
@@ -224,39 +213,28 @@ class TX_LogicPen_AI_V5 {
                 reason: `🤖 AI tăng cường (${this.last_pattern} thành công ${(successRate*100).toFixed(0)}%)`
             };
         }
-
         return p;
     }
 
-    // Cập nhật memory sau khi biết kết quả thực tế
     learnFromResult(actual, predicted, pattern) {
         if (!pattern) return;
-        
-        // Khởi tạo nếu chưa có
         if (!this.patternMemory[pattern]) {
             this.patternMemory[pattern] = { success: 0, fail: 0, total: 0 };
         }
-
         const a = actual.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
         const p = predicted.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
         const correct = (a === p);
-
-        if (correct) {
-            this.patternMemory[pattern].success++;
-        } else {
-            this.patternMemory[pattern].fail++;
-        }
+        if (correct) this.patternMemory[pattern].success++;
+        else this.patternMemory[pattern].fail++;
         this.patternMemory[pattern].total++;
 
-        // Giới hạn bộ nhớ: xóa các pattern cũ nếu vượt quá memorySize
         this.recentPatterns.push(pattern);
         if (this.recentPatterns.length > this.memorySize) {
             const removed = this.recentPatterns.shift();
             const mem = this.patternMemory[removed];
             if (mem && mem.total > 0) {
-                // Giảm trọng số cũ để thích nghi nhanh hơn với xu hướng mới
                 mem.total = Math.max(0, mem.total - 1);
-                mem.success = Math.max(0, mem.success - (correct ? 1 : 0));
+                mem.success = Math.max(0, mem.success - 1);
                 mem.fail = Math.max(0, mem.fail - (correct ? 0 : 1));
             }
         }
@@ -265,12 +243,8 @@ class TX_LogicPen_AI_V5 {
     predict(data) {
         this.loadData(data);
         let result = this.tongHopDuDoan();
-        if (!result) {
-            result = { pred: this._arr()[0] || "TAI", conf: 50, type: "Theo", reason: "Không đủ dữ liệu" };
-        } else {
-            // Áp dụng AI đảo chiều nếu có
-            result = this.aiDaoChieu(result);
-        }
+        if (!result) result = { pred: "TAI", conf: 50, type: "Theo", reason: "Không đủ dữ liệu" };
+        else result = this.aiDaoChieu(result);
         this.last_prediction = result.pred;
         return result;
     }
@@ -284,113 +258,7 @@ class TX_LogicPen_AI_V5 {
     }
 }
 
-// ============ KHỞI TẠO PREDICTOR TOÀN CỤC ============
 const predictor = new TX_LogicPen_AI_V5();
-
-// --------------- THỐNG KÊ CHI TIẾT ---------------
-let detailedStats = {
-    byPattern: {
-        'Đu Bệt': { total: 0, correct: 0, wrong: 0 },
-        'Bẻ Bệt Rồng': { total: 0, correct: 0, wrong: 0 },
-        'Cầu Nối 1-1': { total: 0, correct: 0, wrong: 0 },
-        'Cầu 2-2': { total: 0, correct: 0, wrong: 0 },
-        'Cầu 3-3': { total: 0, correct: 0, wrong: 0 },
-        'Gãy 3-2': { total: 0, correct: 0, wrong: 0 },
-        'Gãy 2-3': { total: 0, correct: 0, wrong: 0 },
-        'Gãy 1-2-1': { total: 0, correct: 0, wrong: 0 },
-        'Mẫu Lặp': { total: 0, correct: 0, wrong: 0 },
-        'Vị cực đại': { total: 0, correct: 0, wrong: 0 },
-        'Vị cực tiểu': { total: 0, correct: 0, wrong: 0 },
-        'Vị bão hòa': { total: 0, correct: 0, wrong: 0 },
-        'Vị cạn kiệt': { total: 0, correct: 0, wrong: 0 },
-        'Vị ổn định': { total: 0, correct: 0, wrong: 0 },
-        'Theo': { total: 0, correct: 0, wrong: 0 }
-    },
-    byConfidence: {
-        '0-50': { total: 0, correct: 0, wrong: 0 },
-        '51-60': { total: 0, correct: 0, wrong: 0 },
-        '61-70': { total: 0, correct: 0, wrong: 0 },
-        '71-80': { total: 0, correct: 0, wrong: 0 },
-        '81-90': { total: 0, correct: 0, wrong: 0 },
-        '91-100': { total: 0, correct: 0, wrong: 0 }
-    },
-    byPrediction: {
-        'TAI': { total: 0, correct: 0, wrong: 0 },
-        'XIU': { total: 0, correct: 0, wrong: 0 }
-    },
-    recentHistory: [],
-    summary: {
-        totalPredictions: 0,
-        totalCorrect: 0,
-        totalWrong: 0,
-        accuracy: 0,
-        bestStreak: 0,
-        worstStreak: 0,
-        currentStreak: 0,
-        lastUpdated: null
-    }
-};
-
-let stats = {
-    total: 0, correct: 0, wrong: 0,
-    current_streak: 0,
-    best_streak: 0,
-    worst_streak: 0
-};
-
-function updateDetailedStats(prediction, actual, pattern, confidence, correct, phien) {
-    if (pattern && detailedStats.byPattern[pattern]) {
-        detailedStats.byPattern[pattern].total++;
-        if (correct) detailedStats.byPattern[pattern].correct++;
-        else detailedStats.byPattern[pattern].wrong++;
-    }
-
-    let confRange = '0-50';
-    if (confidence > 50 && confidence <= 60) confRange = '51-60';
-    else if (confidence > 60 && confidence <= 70) confRange = '61-70';
-    else if (confidence > 70 && confidence <= 80) confRange = '71-80';
-    else if (confidence > 80 && confidence <= 90) confRange = '81-90';
-    else if (confidence > 90) confRange = '91-100';
-    
-    if (detailedStats.byConfidence[confRange]) {
-        detailedStats.byConfidence[confRange].total++;
-        if (correct) detailedStats.byConfidence[confRange].correct++;
-        else detailedStats.byConfidence[confRange].wrong++;
-    }
-
-    const predKey = prediction.toUpperCase();
-    if (detailedStats.byPrediction[predKey]) {
-        detailedStats.byPrediction[predKey].total++;
-        if (correct) detailedStats.byPrediction[predKey].correct++;
-        else detailedStats.byPrediction[predKey].wrong++;
-    }
-
-    detailedStats.recentHistory.push({
-        phien: phien,
-        prediction: prediction,
-        actual: actual,
-        pattern: pattern,
-        confidence: confidence,
-        correct: correct,
-        timestamp: getVietnamTime()
-    });
-    
-    if (detailedStats.recentHistory.length > 1000) {
-        detailedStats.recentHistory = detailedStats.recentHistory.slice(-1000);
-    }
-
-    detailedStats.summary.totalPredictions = stats.total;
-    detailedStats.summary.totalCorrect = stats.correct;
-    detailedStats.summary.totalWrong = stats.wrong;
-    detailedStats.summary.accuracy = stats.total > 0 ? (stats.correct / stats.total * 100) : 0;
-    detailedStats.summary.bestStreak = stats.best_streak;
-    detailedStats.summary.worstStreak = stats.worst_streak;
-    detailedStats.summary.currentStreak = stats.current_streak;
-    detailedStats.summary.lastUpdated = getVietnamTime();
-}
-
-// Lưu các dự đoán đang chờ
-const pendingPredictions = [];
 
 // --------------- HÀM TIỆN ÍCH ---------------
 function getVietnamTime() {
@@ -419,72 +287,37 @@ function checkPendingPredictions(newResult) {
         const p = pendingPredictions[i];
         if (p.phien === phien) {
             const correct = p.prediction === actual;
-
-            // Cập nhật error_streak cho predictor
             predictor.updateStatus(actual);
-
-            // Cập nhật AI memory
             predictor.learnFromResult(actual, p.prediction, p.type);
 
-            // Cập nhật thống kê
-            stats.total++;
-            if (correct) {
-                stats.correct++;
-                stats.current_streak++;
-                if (stats.current_streak > stats.best_streak) stats.best_streak = stats.current_streak;
-            } else {
-                stats.wrong++;
-                stats.current_streak = 0;
-                let wrongStreak = 0;
-                for (let j = detailedStats.recentHistory.length - 1; j >= 0; j--) {
-                    if (!detailedStats.recentHistory[j].correct) wrongStreak++;
-                    else break;
-                }
-                if (wrongStreak > stats.worst_streak) stats.worst_streak = wrongStreak;
-            }
-
-            updateDetailedStats(p.prediction, actual, p.type, p.conf, correct, phien);
+            checkedPredictions.push({
+                phien, prediction: p.prediction, actual,
+                correct, conf: p.conf, type: p.type,
+                timestamp: getVietnamTime()
+            });
+            if (checkedPredictions.length > 1000) checkedPredictions.shift();
             pendingPredictions.splice(i, 1);
             break;
         }
     }
 
-    // Dọn dẹp pending cũ
     const minPhien = phien - 10;
     for (let i = pendingPredictions.length - 1; i >= 0; i--) {
-        if (pendingPredictions[i].phien < minPhien) {
-            pendingPredictions.splice(i, 1);
-        }
+        if (pendingPredictions[i].phien < minPhien) pendingPredictions.splice(i, 1);
     }
 }
 
-// --------------- WEBSOCKET CLIENT (CHỐNG MẤT PHIÊN) ---------------
-let wsConnection = null;
-
+// --------------- WEBSOCKET CLIENT ---------------
 function connectWebSocket() {
-    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-        // Đã kết nối
-        return;
-    }
-
     console.log("[🔄] Đang kết nối WebSocket...");
-    const ws = new WebSocket(WS_URL, {
-        ...WS_OPTIONS,
-        pingInterval: 15000,   // Giống Python gốc: ping_interval=15
-        pingTimeout: 10000     // ping_timeout=10
-    });
+    const ws = new WebSocket(WS_URL, WS_OPTIONS);
 
     ws.on('open', () => {
         console.log("[✅] WebSocket đã kết nối tới Sun.Win");
-        wsConnection = ws;
-
-        // Gửi các tin nhắn khởi tạo với delay (giống Python)
         let delay = 0;
-        initialMessages.forEach((msg) => {
+        initialMessages.forEach(msg => {
             setTimeout(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify(msg));
-                }
+                if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
             }, delay);
             delay += 600;
         });
@@ -532,51 +365,29 @@ function connectWebSocket() {
     });
 
     ws.on('close', (code, reason) => {
-        console.log(`[❌] WebSocket đóng (code: ${code}). Tự động kết nối lại sau 2.5s...`);
-        wsConnection = null;
-        // Tự động reconnect sau 2.5 giây
+        console.log(`[❌] WebSocket đóng. Mã: ${code}. Tự động kết nối lại sau 2.5s...`);
         setTimeout(connectWebSocket, 2500);
     });
 
     ws.on('error', (err) => {
         console.error(`[❌] Lỗi WebSocket: ${err.message}`);
-        ws.close(); // sẽ kích hoạt on close -> reconnect
+        ws.close();
     });
 }
 
-// Kết nối lần đầu
-connectWebSocket();
-
-// --------------- AUTO PING (CHỐNG NGỦ RENDER) ---------------
 function keepAlive() {
     setInterval(() => {
-        http.get(`${SELF_URL}/api/tx`, (res) => {
-            console.log(`[💓] Keep-alive: ${res.statusCode}`);
-        }).on('error', (e) => {
-            console.error(`[💓] Lỗi keep-alive: ${e.message}`);
-        });
+        http.get(`${SELF_URL}/api/tx`, (res) => console.log(`[💓] Keep-alive: ${res.statusCode}`))
+           .on('error', (e) => console.error(`[💓] Lỗi keep-alive: ${e.message}`));
     }, 60000);
 }
 
 // --------------- ROUTES ---------------
 app.get('/', (req, res) => {
-    res.json({
-        app: "Sun.Win Tài Xỉu Data Stream (SIÊU VIP AI)",
-        version: "3.0",
-        author: "HuyDaiXuVN",
-        endpoints: {
-            "/api/tx": "Kết quả mới nhất",
-            "/api/history": "Lịch sử 1.000.000 phiên",
-            "/api/dudoan": "Dự đoán AI phiên tiếp theo",
-            "/api/check": "Giao diện kiểm tra real-time + thống kê",
-            "/api/check/data": "Dữ liệu JSON kiểm tra"
-        }
-    });
+    res.json({ app: "Sun.Win Tài Xỉu Data Stream (VIP)", version: "3.0", author: "HuyDaiXuVN" });
 });
 
-app.get('/api/tx', (req, res) => {
-    res.json(currentResult);
-});
+app.get('/api/tx', (req, res) => res.json(currentResult));
 
 app.get('/api/history', (req, res) => {
     const reversed = [...history].reverse();
@@ -587,7 +398,6 @@ app.get('/api/dudoan', (req, res) => {
     if (history.length < 5) {
         return res.json({ error: "Chưa đủ dữ liệu (cần ít nhất 5 phiên)", current_count: history.length });
     }
-
     const prediction = predictor.predict(history);
     const latest = history[history.length - 1];
     const nextPhien = (latest.phien || 0) + 1;
@@ -608,12 +418,11 @@ app.get('/api/dudoan', (req, res) => {
         ly_do: prediction.reason,
         do_tin_cay: prediction.conf,
         loai_cau: prediction.type,
-        ai_memory: predictor.patternMemory  // Hiển thị trạng thái học của AI
+        ai_memory: predictor.patternMemory
     });
 });
 
 app.get('/api/check', (req, res) => {
-    // Tự động tạo file check.html nếu chưa có
     const checkHtmlPath = path.join(__dirname, 'check.html');
     if (!fs.existsSync(checkHtmlPath)) {
         const html = `<!DOCTYPE html>
@@ -621,210 +430,76 @@ app.get('/api/check', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sun.Win - Kiểm tra Dự đoán AI</title>
+    <title>Sun.Win - Kiểm tra Dự đoán</title>
     <style>
         body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 20px; }
-        h1, h2 { color: #ffd700; text-align: center; }
-        .container { max-width: 1200px; margin: auto; }
-        table { width: 100%; border-collapse: collapse; margin: 15px 0; background: #16213e; }
+        h1 { color: #ffd700; text-align: center; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; background: #16213e; }
         th, td { padding: 10px; text-align: center; border: 1px solid #0f3460; }
         th { background: #0f3460; color: #ffd700; }
         .correct { color: #4caf50; font-weight: bold; }
         .wrong { color: #f44336; font-weight: bold; }
-        .stats-box { display: flex; justify-content: space-around; background: #0f3460; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
-        .tabs { display: flex; justify-content: center; margin: 10px 0; }
-        .tab { padding: 10px 20px; cursor: pointer; background: #0f3460; border: none; color: white; margin: 0 5px; border-radius: 5px; }
-        .tab.active { background: #ffd700; color: black; font-weight: bold; }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🎲 Lịch sử Dự đoán & Thống kê (AI Real-time)</h1>
-        <div class="stats-box" id="summaryStats">
-            <span>Tổng: <b id="total">0</b></span>
-            <span>Đúng: <b id="correct" class="correct">0</b></span>
-            <span>Sai: <b id="wrong" class="wrong">0</b></span>
-            <span>Tỉ lệ đúng: <b id="accuracy">0%</b></span>
-            <span>Streak hiện tại: <b id="curStreak">0</b></span>
-            <span>Streak tốt nhất: <b id="bestStreak">0</b></span>
-        </div>
-
-        <div class="tabs">
-            <button class="tab active" onclick="showTab('history')">Lịch sử dự đoán</button>
-            <button class="tab" onclick="showTab('patterns')">Theo loại cầu</button>
-            <button class="tab" onclick="showTab('confidence')">Theo độ tin cậy</button>
-            <button class="tab" onclick="showTab('prediction')">Theo kết quả dự đoán</button>
-        </div>
-
-        <div id="historyTab" class="tab-content active">
-            <table><thead><tr><th>Phiên</th><th>Dự đoán</th><th>Thực tế</th><th>Đúng/Sai</th><th>Độ tin cậy</th><th>Loại cầu</th><th>Thời gian</th></tr></thead>
-            <tbody id="historyBody"></tbody></table>
-        </div>
-
-        <div id="patternsTab" class="tab-content">
-            <table><thead><tr><th>Loại cầu</th><th>Tổng</th><th>Đúng</th><th>Sai</th><th>Tỉ lệ %</th></tr></thead>
-            <tbody id="patternsBody"></tbody></table>
-        </div>
-
-        <div id="confidenceTab" class="tab-content">
-            <table><thead><tr><th>Độ tin cậy</th><th>Tổng</th><th>Đúng</th><th>Sai</th><th>Tỉ lệ %</th></tr></thead>
-            <tbody id="confidenceBody"></tbody></table>
-        </div>
-
-        <div id="predictionTab" class="tab-content">
-            <table><thead><tr><th>Dự đoán</th><th>Tổng</th><th>Đúng</th><th>Sai</th><th>Tỉ lệ %</th></tr></thead>
-            <tbody id="predictionBody"></tbody></table>
-        </div>
-
-        <div style="text-align:center; color:#aaa; margin-top:20px;">by HuyDaiXuVN | Tự động cập nhật mỗi 2 giây</div>
+    <h1>🎲 Lịch sử Dự đoán (Real-time)</h1>
+    <div id="stats" style="display: flex; justify-content: space-around; background: #0f3460; padding: 15px;">
+        <span>Tổng: <b id="total">0</b></span>
+        <span>Đúng: <b id="correct" class="correct">0</b></span>
+        <span>Sai: <b id="wrong" class="wrong">0</b></span>
+        <span>Tỉ lệ đúng: <b id="accuracy">0%</b></span>
     </div>
+    <table>
+        <thead><tr><th>Phiên</th><th>Dự đoán</th><th>Thực tế</th><th>Kết quả</th><th>Độ tin cậy</th><th>Loại cầu</th><th>Thời gian</th></tr></thead>
+        <tbody id="tbody"></tbody>
+    </table>
 
     <script>
-        function showTab(tabName) {
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-            document.getElementById(tabName + 'Tab').classList.add('active');
-            event.target.classList.add('active');
-        }
-
         async function fetchData() {
-            try {
-                const res = await fetch('/api/check/data');
-                const data = await res.json();
-                updateSummary(data.summary);
-                renderHistory(data.recentHistory);
-                renderPatterns(data.byPattern);
-                renderConfidence(data.byConfidence);
-                renderPrediction(data.byPrediction);
-            } catch (e) {
-                console.error('Lỗi fetch:', e);
-            }
-        }
-
-        function updateSummary(sum) {
-            document.getElementById('total').textContent = sum.totalPredictions;
-            document.getElementById('correct').textContent = sum.totalCorrect;
-            document.getElementById('wrong').textContent = sum.totalWrong;
-            document.getElementById('accuracy').textContent = (sum.accuracy || 0).toFixed(1) + '%';
-            document.getElementById('curStreak').textContent = sum.currentStreak;
-            document.getElementById('bestStreak').textContent = sum.bestStreak;
-        }
-
-        function renderHistory(history) {
-            const tbody = document.getElementById('historyBody');
+            const res = await fetch('/api/check/data');
+            const data = await res.json();
+            document.getElementById('total').textContent = data.summary.total;
+            document.getElementById('correct').textContent = data.summary.correct;
+            document.getElementById('wrong').textContent = data.summary.wrong;
+            document.getElementById('accuracy').textContent = (data.summary.total > 0 ? (data.summary.correct / data.summary.total * 100).toFixed(1) : 0) + '%';
+            const tbody = document.getElementById('tbody');
             tbody.innerHTML = '';
-            if (!history || history.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7">Chưa có dữ liệu</td></tr>';
-                return;
-            }
-            [...history].reverse().forEach(item => {
-                const row = document.createElement('tr');
-                row.innerHTML = '<td>' + (item.phien || '') + '</td>' +
-                    '<td>' + (item.prediction || '') + '</td>' +
-                    '<td>' + (item.actual || '') + '</td>' +
-                    '<td class="' + (item.correct ? 'correct' : 'wrong') + '">' + (item.correct ? '✅ Đúng' : '❌ Sai') + '</td>' +
-                    '<td>' + (item.confidence || '') + '%</td>' +
-                    '<td>' + (item.pattern || '') + '</td>' +
-                    '<td>' + (item.timestamp || '') + '</td>';
-                tbody.appendChild(row);
+            [...data.recentHistory].reverse().forEach(item => {
+                tbody.innerHTML += `<tr>
+                    <td>${item.phien||''}</td>
+                    <td>${item.prediction||''}</td>
+                    <td>${item.actual||''}</td>
+                    <td class="${item.correct?'correct':'wrong'}">${item.correct?'✅ Đúng':'❌ Sai'}</td>
+                    <td>${item.conf||''}%</td>
+                    <td>${item.type||''}</td>
+                    <td>${item.timestamp||''}</td>
+                </tr>`;
             });
         }
-
-        function renderPatterns(patterns) {
-            const tbody = document.getElementById('patternsBody');
-            tbody.innerHTML = '';
-            const sorted = Object.entries(patterns).filter(([_,v]) => v.total > 0).sort((a,b) => b[1].total - a[1].total);
-            if (sorted.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5">Không có dữ liệu</td></tr>';
-                return;
-            }
-            sorted.forEach(([name, data]) => {
-                const rate = (data.correct / data.total * 100).toFixed(1);
-                tbody.innerHTML += '<tr><td>' + name + '</td><td>' + data.total + '</td><td>' + data.correct + '</td><td>' + data.wrong + '</td><td>' + rate + '%</td></tr>';
-            });
-        }
-
-        function renderConfidence(conf) {
-            const tbody = document.getElementById('confidenceBody');
-            tbody.innerHTML = '';
-            const sorted = Object.entries(conf).filter(([_,v]) => v.total > 0);
-            if (sorted.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5">Không có dữ liệu</td></tr>';
-                return;
-            }
-            sorted.forEach(([range, data]) => {
-                const rate = (data.correct / data.total * 100).toFixed(1);
-                tbody.innerHTML += '<tr><td>' + range + '</td><td>' + data.total + '</td><td>' + data.correct + '</td><td>' + data.wrong + '</td><td>' + rate + '%</td></tr>';
-            });
-        }
-
-        function renderPrediction(pred) {
-            const tbody = document.getElementById('predictionBody');
-            tbody.innerHTML = '';
-            const sorted = Object.entries(pred).filter(([_,v]) => v.total > 0);
-            if (sorted.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5">Không có dữ liệu</td></tr>';
-                return;
-            }
-            sorted.forEach(([key, data]) => {
-                const rate = (data.correct / data.total * 100).toFixed(1);
-                tbody.innerHTML += '<tr><td>' + key + '</td><td>' + data.total + '</td><td>' + data.correct + '</td><td>' + data.wrong + '</td><td>' + rate + '%</td></tr>';
-            });
-        }
-
         fetchData();
         setInterval(fetchData, 2000);
     </script>
 </body>
 </html>`;
         fs.writeFileSync(checkHtmlPath, html, 'utf8');
-        console.log("[✅] Đã tạo file check.html");
     }
     res.sendFile(checkHtmlPath);
 });
 
 app.get('/api/check/data', (req, res) => {
     res.json({
-        recentHistory: detailedStats.recentHistory,
-        byPattern: detailedStats.byPattern,
-        byConfidence: detailedStats.byConfidence,
-        byPrediction: detailedStats.byPrediction,
-        summary: detailedStats.summary
+        recentHistory: checkedPredictions,
+        summary: {
+            total: checkedPredictions.length,
+            correct: checkedPredictions.filter(x => x.correct).length,
+            wrong: checkedPredictions.filter(x => !x.correct).length
+        }
     });
 });
 
-// 404
-app.use((req, res) => {
-    res.status(404).json({ error: "Endpoint không tồn tại" });
-});
+app.use((req, res) => res.status(404).json({ error: "Endpoint không tồn tại" }));
 
 // --------------- KHỞI ĐỘNG ---------------
-async function main() {
-    console.log("=".repeat(60));
-    console.log("🎲  SUN.WIN TÀI XỈU DATA STREAM (SIÊU VIP AI)");
-    console.log("👤  HuyDaiXuVN");
-    console.log("=".repeat(60));
-    console.log(`👤 User: ${TOKEN_DATA.username}`);
-    console.log(`🌐 IP: ${TOKEN_DATA.ipAddress}`);
-    console.log(`📡 Server: http://localhost:${PORT}`);
-    console.log(`🔗 Keep-alive: ${SELF_URL}`);
-    console.log(`🧠 AI: Tự học bẻ cầu theo tỉ lệ thắng/thua`);
-    console.log(`🔌 WebSocket: ping/pong chống mất phiên`);
-    console.log("=".repeat(60));
-
-    // Khởi động Express
-    app.listen(PORT, () => console.log(`[🚀] Server sẵn sàng trên cổng ${PORT}`));
-
-    // Auto ping
-    keepAlive();
-}
-
-process.on('SIGINT', () => { console.log("\n[👋] Tắt server..."); process.exit(0); });
-process.on('SIGTERM', () => { console.log("\n[👋] Tắt server..."); process.exit(0); });
-
-main().catch(err => {
-    console.error(`[❌] Lỗi khởi động: ${err.message}`);
-    process.exit(1);
-});
+connectWebSocket();
+app.listen(PORT, () => console.log(`[🚀] Server sẵn sàng tại http://localhost:${PORT}`));
+keepAlive();
