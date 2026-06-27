@@ -1,763 +1,715 @@
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const fs = require('fs').promises;
-const path = require('path');
 const axios = require('axios');
-const crypto = require('crypto');
+const express = require('express');
+const https = require('https');
 
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-const PORT = 8000;
+// ======================
+// CẤU HÌNH TÀI KHOẢN
+// ======================
+const USERNAME = "6tyghujkm";
+const PASSWORD = "6tyghujkm";
 
-// ===== DB =====
-const DB_PATH = path.join(__dirname, 'db.json');
-async function readDB() {
+const BASE = "https://aibcr.me";
+const LOGIN_URL = `${BASE}/login`;
+const LOBBY_URL = `${BASE}/ae/lobby`;
+const GET_RESULT_URL = `${BASE}/baccarat/getnewresult`;
+
+const agent = new https.Agent({ rejectUnauthorized: false });
+let cookieJar = '';
+let baccaratData = [];
+let lastUpdate = null;
+
+// ======================
+// BIẾN TOÀN CỤC CHO AI
+// ======================
+const aiModel = {};                              // key: state, value: { follow: {success,total}, break: {success,total} }
+const AI_THRESHOLD = 5;                          // số mẫu tối thiểu để dùng AI
+let predictions = {};
+let previousResults = {};
+let history = [];                                // lịch sử dự đoán
+let aiTrainingCount = 0;                         // đếm số phiên đã học (giới hạn 1000)
+
+// ======================
+// SESSION AXIOS
+// ======================
+const session = axios.create({
+    baseURL: BASE,
+    timeout: 30000,
+    httpsAgent: agent,
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+});
+
+session.interceptors.request.use(config => {
+    if (cookieJar) config.headers.Cookie = cookieJar;
+    return config;
+});
+
+session.interceptors.response.use(res => {
+    const setCookie = res.headers['set-cookie'];
+    if (setCookie) {
+        for (const cookie of setCookie) {
+            const [name, value] = cookie.split(';')[0].split('=');
+            const regex = new RegExp(`${name}=[^;]+;?`, 'g');
+            cookieJar = cookieJar.replace(regex, '');
+            cookieJar += `${name}=${value}; `;
+        }
+    }
+    return res;
+});
+
+// ======================
+// CSRF TOKEN
+// ======================
+function getCsrfToken(html) {
+    let match = html.match(/<input[^>]*name="_token"[^>]*value="([^"]+)"/);
+    if (match) return match[1];
+    match = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/);
+    return match ? match[1] : null;
+}
+
+// ======================
+// ĐĂNG NHẬP
+// ======================
+async function login() {
     try {
-        const data = await fs.readFile(DB_PATH, 'utf-8');
-        const parsed = JSON.parse(data || '{"accounts":[],"transactions":[]}');
-        if (!parsed.accounts) parsed.accounts = [];
-        if (!parsed.transactions) parsed.transactions = [];
-        return parsed;
-    } catch (e) {
-        if (e.code === 'ENOENT') {
-            const initial = { accounts: [], transactions: [] };
-            await writeDB(initial);
-            return initial;
+        console.log('[LOGIN] Đang lấy trang đăng nhập...');
+        const getResp = await session.get(LOGIN_URL);
+        const token = getCsrfToken(getResp.data);
+        if (!token) {
+            console.error('[LOGIN] Không tìm thấy CSRF token!');
+            return false;
         }
-        throw e;
+        console.log(`[LOGIN] CSRF token: ${token}`);
+
+        const formData = new URLSearchParams();
+        formData.append('username', USERNAME);
+        formData.append('password', PASSWORD);
+        formData.append('_token', token);
+        formData.append('action', 'Login');
+
+        const headers = {
+            'Referer': LOGIN_URL,
+            'Origin': BASE,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        };
+
+        console.log('[LOGIN] Đang gửi request đăng nhập...');
+        const loginResp = await session.post(LOGIN_URL, formData.toString(), { headers });
+        
+        if (loginResp.status === 200 || loginResp.status === 302) {
+            console.log('[LOGIN] Thành công!');
+            return true;
+        }
+        console.error(`[LOGIN] Thất bại, status: ${loginResp.status}`);
+        return false;
+    } catch (error) {
+        console.error('[LOGIN] Lỗi:', error.message);
+        return false;
     }
-}
-async function writeDB(data) {
-    await fs.writeFile(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
-}
-async function getAccounts() {
-    const db = await readDB();
-    return db.accounts;
-}
-async function getAccountByPhone(phone) {
-    const accounts = await getAccounts();
-    return accounts.find(acc => acc.phone === phone) || null;
-}
-async function getAccountById(id) {
-    const accounts = await getAccounts();
-    return accounts.find(acc => acc.id === id) || null;
-}
-async function saveAccount(accountData) {
-    const db = await readDB();
-    const index = db.accounts.findIndex(acc => acc.phone === accountData.phone);
-    if (index !== -1) {
-        db.accounts[index] = { ...db.accounts[index], ...accountData };
-    } else {
-        accountData.id = accountData.id || Date.now().toString();
-        db.accounts.push(accountData);
-    }
-    await writeDB(db);
-    return true;
-}
-async function removeAccount(id) {
-    const db = await readDB();
-    db.accounts = db.accounts.filter(acc => acc.id !== id);
-    await writeDB(db);
-    return true;
-}
-async function logTransaction(transactionData) {
-    const db = await readDB();
-    db.transactions.push({
-        id: Date.now().toString(),
-        time: Math.floor(Date.now() / 1000),
-        date_time: new Date().toLocaleDateString('en-GB'),
-        ...transactionData
-    });
-    await writeDB(db);
-    return true;
 }
 
-// ===== Zalopay =====
-class Zalopay {
-    constructor() { this.config = {}; }
-    loadData(data) { this.config = data; return this; }
-    sha256(pw) { return crypto.createHash('sha256').update(pw).digest('hex'); }
-    getZaloHeader(isSapi = true) {
-        return {
-            'Cookie': this.config.cookie || '',
-            'Accept': '*/*',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0',
-            'Accept-Language': 'vi-VN,vi;q=0.9',
-            ...(isSapi ? { 'Host': 'sapi.zalopay.vn' } : {})
+// ======================
+// VÀO LOBBY
+// ======================
+async function goToLobby() {
+    try {
+        console.log('[LOBBY] Đang vào lobby...');
+        await session.get(LOBBY_URL);
+        console.log('[LOBBY] OK');
+        return true;
+    } catch (error) {
+        console.error('[LOBBY] Lỗi:', error.message);
+        return false;
+    }
+}
+
+// ======================
+// LẤY DỮ LIỆU BACCARAT
+// ======================
+async function fetchBaccaratData() {
+    try {
+        let xsrfToken = '';
+        const xsrfMatch = cookieJar.match(/XSRF-TOKEN=([^;]+)/);
+        if (xsrfMatch) xsrfToken = decodeURIComponent(xsrfMatch[1]);
+        
+        const headers = {
+            'Referer': LOBBY_URL,
+            'Origin': BASE,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
         };
-    }
-    async getRequest(url, headers = {}) {
-        try {
-            const resp = await axios.get(url, { headers: { ...this.getZaloHeader(), ...headers } });
-            return resp.data;
-        } catch (e) {
-            return e.response ? e.response.data : { error: e.message };
-        }
-    }
-    async postRequest(url, data, isPlain = false) {
-        try {
-            const h = this.getZaloHeader();
-            if (isPlain) { h['Content-Type'] = 'text/plain;charset=UTF-8'; data = JSON.stringify(data); }
-            const resp = await axios.post(url, data, { headers: h });
-            return resp.data;
-        } catch (e) {
-            return e.response ? e.response.data : { error: e.message };
-        }
-    }
-    async ZaloLogin_Cookie() {
-        return await this.getRequest('https://sapi.zalopay.vn/v2/user/profile/kyc', {
-            'Referer': `https://social.zalopay.vn/spa/v2?c=1&c_time=${Date.now()}`
-        });
-    }
-    async getBalance_web() {
-        return await this.getRequest('https://api.zalopay.vn/v2/user/balance', { 'Host': 'api.zalopay.vn' });
-    }
-    async income_outcome_web(month, year) {
-        return await this.getRequest(`https://sapi.zalopay.vn/v2/history/income-outcome?days=5&months=${month}&year=${year}`);
-    }
-    async getTransactions2_optimized() {
-        try {
-            const url = 'https://sapi.zalopay.vn/v2/history/transactions?page_size=50';
-            const headers = this.getZaloHeader();
-            const res = await axios.get(url, { headers });
-            const data = res.data;
-            if (!data.data || !data.data.transactions) {
-                return { status: 'error', msg: 'Không có dữ liệu', transactions: [] };
-            }
-            const txs = data.data.transactions.map(tx => ({
-                transactionID: tx.trans_id || tx.app_trans_id,
-                amount: tx.amount || tx.trans_amount || 0,
-                description: tx.description || '',
-                transactionDate: tx.trans_time ? new Date(tx.trans_time).toISOString().split('T')[0] : null,
-                type: tx.sign === 1 ? 'IN' : 'OUT'
+        if (xsrfToken) headers['X-XSRF-TOKEN'] = xsrfToken;
+
+        const formData = new URLSearchParams();
+        formData.append('gameCode', 'ae');
+
+        const resp = await session.post(GET_RESULT_URL, formData.toString(), { headers });
+        
+        if (resp.data && resp.data.code === 200 && Array.isArray(resp.data.data)) {
+            baccaratData = resp.data.data.map(item => ({
+                table: item.table_name,
+                table_id: item.table_id,
+                result: item.result,
+                goodRoad: item.goodRoad || '',
+                cards: item.cards || '',
+                game_code: item.game_code
             }));
-            return { status: 'success', transactions: txs };
-        } catch (e) {
-            return { status: 'error', msg: e.message, transactions: [] };
+            lastUpdate = new Date().toISOString();
+            console.log(`[FETCH] Lấy thành công ${baccaratData.length} bàn lúc ${lastUpdate}`);
+        } else {
+            console.warn('[FETCH] Dữ liệu không đúng format:', resp.data);
+        }
+        return baccaratData;
+    } catch (error) {
+        console.error('[FETCH] Lỗi:', error.message);
+        return [];
+    }
+}
+
+// ======================
+// CÁC HÀM HỖ TRỢ AI
+// ======================
+function filterT(str) {
+    return (str || '').replace(/T/gi, '');
+}
+
+function parseGoodRoad(goodRoad) {
+    if (!goodRoad) return null;
+    const low = goodRoad.toLowerCase();
+    if (low.includes('bệt')) return { type: 'streak' };
+    if (low.includes('1-1') || low.includes('so le')) return { type: 'alternating', step: 1 };
+    if (low.includes('2-2')) return { type: 'pattern', step: 2 };
+    return null;
+}
+
+// Tạo state cho AI từ chuỗi kết quả (đã lọc T) và goodRoad
+function getAIState(resultNoT, goodRoad) {
+    const roadInfo = parseGoodRoad(goodRoad);
+    const roadType = roadInfo ? roadInfo.type : 'none';
+    
+    // Lấy 3 kết quả cuối cùng, nếu ít hơn thì thêm 'X'
+    let last3 = resultNoT.slice(-3);
+    if (last3.length < 3) {
+        last3 = ('XXX' + last3).slice(-3);   // pad đầu bằng X
+    }
+    return `${last3}_${roadType}`;
+}
+
+// Cập nhật mô hình AI: state, action ('follow'/'break'), correct (boolean)
+function updateAIModel(state, action, correct) {
+    if (!aiModel[state]) {
+        aiModel[state] = {
+            follow: { success: 0, total: 0 },
+            break: { success: 0, total: 0 }
+        };
+    }
+    const entry = aiModel[state][action];
+    entry.total++;
+    if (correct) entry.success++;
+    aiTrainingCount++;
+    
+    // Giới hạn tổng số phiên học là 1000 để tránh quá tải
+    // (có thể xóa bớt các state cũ nếu vượt quá – tạm thời không cần)
+}
+
+// Lấy dự đoán từ AI cho một state, trả về {action, confidence} hoặc null nếu không đủ dữ liệu
+function getAIPrediction(state) {
+    const entry = aiModel[state];
+    if (!entry) return null;
+    
+    const followTotal = entry.follow.total;
+    const breakTotal = entry.break.total;
+    const total = followTotal + breakTotal;
+    
+    if (total < AI_THRESHOLD) return null;   // chưa đủ mẫu
+    
+    const followRate = followTotal > 0 ? entry.follow.success / followTotal : 0;
+    const breakRate = breakTotal > 0 ? entry.break.success / breakTotal : 0;
+    
+    // Chọn action có tỉ lệ thắng cao hơn
+    if (followRate > breakRate) {
+        return { action: 'follow', confidence: Math.round(followRate * 100) };
+    } else if (breakRate > followRate) {
+        return { action: 'break', confidence: Math.round(breakRate * 100) };
+    } else {
+        // tỉ lệ bằng nhau -> chọn theo dữ liệu nhiều hơn hoặc ngẫu nhiên
+        if (followTotal >= breakTotal) {
+            return { action: 'follow', confidence: Math.round(followRate * 100) };
+        } else {
+            return { action: 'break', confidence: Math.round(breakRate * 100) };
         }
     }
-    async get_info_web(phone) {
-        let p = phone.startsWith('0') ? '84' + phone.substring(1) : phone;
-        return await this.getRequest(`https://sapi.zalopay.vn/v3/ibft/web/get-user-info?phone=${p}`, {
-            'Referer': 'https://social.zalopay.vn/spa/v2/home-transfer'
-        });
-    }
-    async Order_Money_web(info, msg, amount, cfm_token = '') {
-        const data = {
-            receiver_zalopay_id: "", receiver_zalo_id: "",
-            receiver_name: info.data.name, receiver_avatar: info.data.avatar,
-            amount: parseInt(amount), note: msg,
-            zalo_token: "", media: { greeting_card: { theme_id: "142" } },
-            utoken: "", zpp: decodeURIComponent(info.data.zpp)
+}
+
+// ======================
+// HÀM DỰ ĐOÁN CHÍNH (KẾT HỢP AI + LUẬT)
+// ======================
+function predictNext(resultNoT, goodRoad) {
+    if (!resultNoT || resultNoT.length === 0) {
+        return {
+            prediction: 'P',
+            confidence: 50,
+            method: 'Mặc định (P)',
+            ai_used: false
         };
-        if (cfm_token) data.cfm_token = cfm_token;
-        const result = await this.postRequest('https://sapi.zalopay.vn/mt/v5/create-order-v2', data);
-        if (!cfm_token && result?.error?.details?.error_info?.reason === 'Reason_DUPLICATE_ORDER') {
-            const token = result.error.details.error_info.metadata?.cfm_token;
-            if (token) {
-                console.log('[Order] Duplicate, retry with cfm_token');
-                return await this.Order_Money_web(info, msg, amount, token);
-            }
+    }
+
+    const recent = resultNoT.slice(-30);
+    const lastChar = recent[recent.length - 1];
+
+    // ---- 1. Thử dùng AI ----
+    const state = getAIState(resultNoT, goodRoad);
+    const aiResult = getAIPrediction(state);
+
+    if (aiResult) {
+        const nextResult = aiResult.action === 'follow' ? lastChar : (lastChar === 'P' ? 'B' : 'P');
+        return {
+            prediction: nextResult,
+            confidence: aiResult.confidence,
+            method: `AI (${aiResult.action}) - state: ${state}`,
+            ai_used: true,
+            ai_state: state,
+            ai_action: aiResult.action
+        };
+    }
+
+    // ---- 2. Fallback: luật thủ công VIP ----
+    const roadInfo = parseGoodRoad(goodRoad);
+
+    // Bệt mạnh
+    function checkStreak(str) {
+        if (!str) return { char: null, len: 0 };
+        const last = str[str.length - 1];
+        let count = 0;
+        for (let i = str.length - 1; i >= 0; i--) {
+            if (str[i] === last) count++;
+            else break;
         }
-        return result;
+        return { char: last, len: count };
     }
-    async Get_assets_web(order) {
-        const url = 'https://sapi.zalopay.vn/v2/cashier/assets';
-        const data = {
-            order_type: "FULL_ORDER", full_assets: true,
-            order_data: {
-                app_id: order.app_id, app_trans_id: order.app_trans_id, app_time: order.app_time,
-                app_user: order.app_user, amount: order.amount, item: order.item || "[]",
-                description: order.description, embed_data: order.embeddata ? JSON.stringify(order.embeddata) : '"{}"',
-                mac: order.mac || "", trans_type: 1, product_code: "TF007",
-                service_fee: { fee_amount: 0, total_free_trans: 0, remain_free_trans: 0 }
-            },
-            token_data: { trans_token: "", app_id: order.app_id, order_token: order.order_token },
-            campaign_code: "", display_mode: 1
+    const streak = checkStreak(recent);
+    if (streak.len >= 4) {
+        return {
+            prediction: streak.char,
+            confidence: Math.min(90, 60 + streak.len * 5),
+            method: `Bệt ${streak.len}`,
+            ai_used: false
         };
-        return await this.postRequest(url, data, true);
     }
-    async Pay_Money_web(assets) {
-        const data = {
-            authenticator: { authen_type: 1, auth_info: "eyJhdXRoX3R5cGUiOjF9", pin: this.sha256(this.config.password) },
-            order_fee: [0], order_token: assets.data.order_token,
-            promotion_token: "", service_id: 19,
-            sof_token: assets.data.sources_of_fund[0].sof_token,
-            user_fee: [0], zalo_token: "",
-            callback_url: `zalo://qr/jp/nibvlsoj2j?cb_t=dotp&k=${Date.now()}&otp=`,
-            card: null, is_zmp: false
-        };
-        return await this.postRequest('https://sapi.zalopay.vn/v2/cashier/pay', data, true);
-    }
-    async SendMoney_web(phone, msg, amount) {
-        const info = await this.get_info_web(phone);
-        if (!info.data) return { status: 'error', message: info.error?.details?.localized_message?.message || 'SĐT không hợp lệ' };
-        const order = await this.Order_Money_web(info, msg, amount);
-        if (!order || (!order.data && !order.ac_order)) return { status: 'error', message: order?.error?.details?.localized_message?.message || 'Lỗi tạo đơn' };
-        const orderData = order.ac_order || order.data || {};
-        order.app_id = orderData.app_id;
-        order.app_trans_id = orderData.app_trans_id;
-        order.order_token = orderData.order_token;
-        order.app_time = Date.now();
-        order.app_user = "ZaloPay";
-        order.amount = amount;
-        order.description = msg;
-        order.mac = "";
-        order.item = "[]";
-        const assets = await this.Get_assets_web(order);
-        let source_of_fund = null;
-        if (assets && assets.data) {
-            if (assets.data.source_of_fund) source_of_fund = assets.data.source_of_fund;
-            else if (assets.data.sources_of_fund && assets.data.sources_of_fund.length > 0) source_of_fund = assets.data.sources_of_fund[0];
+
+    // Cầu 1-1
+    function isAlternating(str) {
+        if (str.length < 4) return false;
+        for (let i = 1; i < str.length; i++) {
+            if (str[i] === str[i - 1]) return false;
         }
-        if (!source_of_fund || source_of_fund.status !== 1) return { status: 'error', message: source_of_fund?.message || 'Lỗi nguồn tiền' };
-        if (Number(source_of_fund.balance) < Number(amount)) return { status: 'error', message: 'Số dư không đủ' };
-        const pay = await this.Pay_Money_web(assets);
-        if (!pay || pay.error) return { status: 'error', message: pay.error?.details?.localized_message?.message || 'Chuyển thất bại' };
-        if (pay.data && (pay.data.is_processing === 1 || pay.data.is_processing === true)) {
-            return {
-                status: 'success', message: 'Chuyển thành công',
-                data: { zp_trans_id: pay.data.zp_trans_id || orderData.order_no, partner_name: info.data.name }
+        return true;
+    }
+    if (isAlternating(recent)) {
+        return {
+            prediction: lastChar === 'P' ? 'B' : 'P',
+            confidence: 70,
+            method: 'Cầu 1-1',
+            ai_used: false
+        };
+    }
+
+    // Cầu 2-2 (pattern)
+    function isPattern2(str) {
+        if (str.length < 4) return false;
+        const sub = str.slice(-4);
+        return sub[0] === sub[2] && sub[1] === sub[3] && sub[0] !== sub[1];
+    }
+    if (isPattern2(recent)) {
+        // dự đoán theo block 1
+        const next = recent.slice(-2, -1); // ký tự thứ 2 từ dưới lên (block1)
+        return {
+            prediction: next,
+            confidence: 65,
+            method: 'Cầu 2-2',
+            ai_used: false
+        };
+    }
+
+    // Nghiêng P/B
+    const countP = (recent.match(/P/g) || []).length;
+    const countB = (recent.match(/B/g) || []).length;
+    if (countP - countB > 2) return { prediction: 'P', confidence: 60, method: 'Nghiêng P', ai_used: false };
+    if (countB - countP > 2) return { prediction: 'B', confidence: 60, method: 'Nghiêng B', ai_used: false };
+
+    // Bẻ cầu nếu bệt 3
+    if (streak.len === 3) {
+        return {
+            prediction: lastChar === 'P' ? 'B' : 'P',
+            confidence: 55,
+            method: 'Bẻ cầu 3',
+            ai_used: false
+        };
+    }
+
+    // Mặc định theo last
+    return {
+        prediction: lastChar,
+        confidence: 50,
+        method: 'Theo kết quả cuối',
+        ai_used: false
+    };
+}
+
+// ======================
+// CẬP NHẬT DỰ ĐOÁN & KIỂM TRA KẾT QUẢ (CÓ HỌC AI)
+// ======================
+function updatePredictionsAndCheckResults() {
+    for (const item of baccaratData) {
+        const table = item.table;
+        const rawResult = item.result || '';
+        const goodRoad = item.goodRoad || '';
+        const resultNoT = filterT(rawResult);
+
+        // Lần đầu thấy bàn -> khởi tạo
+        if (!previousResults.hasOwnProperty(table)) {
+            previousResults[table] = resultNoT;
+            const pred = predictNext(resultNoT, goodRoad);
+            predictions[table] = {
+                table,
+                predicted_result: pred.prediction,
+                confidence: pred.confidence,
+                method: pred.method,
+                predicted_at: new Date().toISOString(),
+                session: resultNoT.length + 1,
+                current_result: resultNoT,
+                ai_state: pred.ai_state || null,
+                ai_action: pred.ai_action || null
             };
+            // Thêm vào history (chờ kết quả)
+            history.push({
+                table,
+                predicted_result: pred.prediction,
+                confidence: pred.confidence,
+                method: pred.method,
+                predicted_at: predictions[table].predicted_at,
+                actual_result: null,
+                is_correct: null,
+                session: resultNoT.length + 1,
+                ai_state: pred.ai_state || null,
+                ai_action: pred.ai_action || null
+            });
+            continue;
         }
-        return { status: 'error', message: 'Trạng thái không xác định' };
-    }
-    async Create_QR_web(amount, note) {
-        return await this.postRequest('https://sapi.zalopay.vn/v1/mt/flex-qrcode/generate', {
-            amount: parseInt(amount), message: note, size: 190
-        }, true);
-    }
-    async get_name_bank_web(stk, bankcode) {
-        const url = 'https://scard.zalopay.vn/v1/mt/ibft-switch/tof/inquiry';
-        const data = { bank_code: bankcode, bank_number: stk, type: 0 };
-        const h = this.getZaloHeader();
-        h['Host'] = 'scard.zalopay.vn';
-        h['Content-Type'] = 'text/plain;charset=UTF-8';
-        try {
-            const resp = await axios.post(url, JSON.stringify(data), { headers: h });
-            return resp.data;
-        } catch (e) {
-            return e.response ? e.response.data : { error: e.message };
+
+        // So sánh với kết quả cũ
+        const oldResult = previousResults[table];
+        if (resultNoT.length > oldResult.length) {
+            // Có kết quả mới
+            const newChars = resultNoT.slice(oldResult.length);
+            const actual = newChars[0]; // phiên vừa kết thúc
+
+            // Tìm dự đoán đang chờ cho bàn này
+            const pendingIdx = history.findIndex(
+                h => h.table === table && h.actual_result === null
+            );
+            if (pendingIdx !== -1) {
+                const pending = history[pendingIdx];
+                // Cập nhật kết quả thực tế
+                pending.actual_result = actual;
+                pending.is_correct = (actual === pending.predicted_result);
+                pending.result_at = new Date().toISOString();
+
+                // === HỌC AI ===
+                if (pending.ai_state && pending.ai_action) {
+                    updateAIModel(pending.ai_state, pending.ai_action, pending.is_correct);
+                }
+            }
+
+            // Cập nhật previousResults
+            previousResults[table] = resultNoT;
+
+            // Tạo dự đoán mới cho phiên tiếp theo
+            const pred = predictNext(resultNoT, goodRoad);
+            predictions[table] = {
+                table,
+                predicted_result: pred.prediction,
+                confidence: pred.confidence,
+                method: pred.method,
+                predicted_at: new Date().toISOString(),
+                session: resultNoT.length + 1,
+                current_result: resultNoT,
+                ai_state: pred.ai_state || null,
+                ai_action: pred.ai_action || null
+            };
+            history.push({
+                table,
+                predicted_result: pred.prediction,
+                confidence: pred.confidence,
+                method: pred.method,
+                predicted_at: predictions[table].predicted_at,
+                actual_result: null,
+                is_correct: null,
+                session: resultNoT.length + 1,
+                ai_state: pred.ai_state || null,
+                ai_action: pred.ai_action || null
+            });
+        } else {
+            // Không có kết quả mới, chỉ cập nhật lại dự đoán (goodRoad có thể đổi)
+            const pred = predictNext(resultNoT, goodRoad);
+            predictions[table] = {
+                table,
+                predicted_result: pred.prediction,
+                confidence: pred.confidence,
+                method: pred.method,
+                predicted_at: new Date().toISOString(),
+                session: resultNoT.length + 1,
+                current_result: resultNoT,
+                ai_state: pred.ai_state || null,
+                ai_action: pred.ai_action || null
+            };
+            // Không thêm history mới
         }
-    }
-    async createorder_send_bank_web(stk, config_bank, info_data, amount, description) {
-        const url = 'https://scard.zalopay.vn/v1/mt/ibft-switch/tof/create-order';
-        const data = {
-            amount: parseInt(amount), bank_code: config_bank.bankcode,
-            bank_holder_name: info_data.bank_holder_name, bank_number: stk,
-            ii_type: 0, inquiry_info: info_data.inquiry_info, message: description,
-            nickname: info_data.nickname, save: info_data.saved || false, type: info_data.type || 0
-        };
-        const h = this.getZaloHeader();
-        h['Host'] = 'scard.zalopay.vn';
-        h['Content-Type'] = 'text/plain;charset=UTF-8';
-        try {
-            const resp = await axios.post(url, JSON.stringify(data), { headers: h });
-            return resp.data;
-        } catch (e) {
-            return e.response ? e.response.data : { error: e.message };
-        }
-    }
-    async assets_bank_web(order) {
-        const url = 'https://sapi.zalopay.vn/v2/cashier/assets';
-        const data = {
-            order_type: "FULL_ORDER", full_assets: true,
-            order_data: {
-                app_id: order.app_id, app_trans_id: order.app_trans_id, app_time: order.app_time,
-                app_user: order.app_user, amount: order.amount, item: order.item || "[]",
-                description: order.description, embed_data: order.embeddata ? JSON.stringify(order.embeddata) : '"{}"',
-                mac: order.mac || "", trans_type: 1, product_code: "TF007",
-                service_fee: { fee_amount: 0, total_free_trans: 0, remain_free_trans: 0 }
-            },
-            token_data: { trans_token: "", app_id: order.app_id, order_token: order.order_token },
-            campaign_code: "", display_mode: 1
-        };
-        return await this.postRequest(url, data, true);
-    }
-    async pay_bank_web(assets) {
-        const data = {
-            authenticator: { authen_type: 1, auth_info: "eyJhdXRoX3R5cGUiOjF9", pin: this.sha256(this.config.password) },
-            order_fee: [0], order_token: assets.data.order_token, promotion_token: "", service_id: 19,
-            sof_token: assets.data.sources_of_fund[0].sof_token, user_fee: [0], zalo_token: "",
-            callback_url: `zalo://qr/jp/nibvlsoj2j?cb_t=dotp&k=${Date.now()}&otp=`, card: null, is_zmp: false
-        };
-        return await this.postRequest('https://sapi.zalopay.vn/v2/cashier/pay', data, true);
-    }
-    async SendMoney_Bank_web(stk, amount, description, config_bank) {
-        const info = await this.get_name_bank_web(stk, config_bank.bankcode);
-        if (!info || !info.bank_holder_name) return { status: 'error', message: 'STK không hợp lệ' };
-        const order = await this.createorder_send_bank_web(stk, config_bank, info, amount, description);
-        if (!order || !order.ac_order) return { status: 'error', message: order?.error?.details?.localized_message?.message || 'Tạo lệnh thất bại' };
-        let numberBank4 = stk.slice(-4);
-        let first6 = stk.substring(0, 6);
-        order.app_id = order.ac_order.app_id;
-        order.app_trans_id = order.ac_order.app_trans_id;
-        order.order_token = order.ac_order.order_token;
-        order.app_time = Date.now();
-        order.app_user = "ZaloPay";
-        order.amount = amount;
-        order.description = description;
-        order.mac = "";
-        order.item = `{"ibfttype":2,"ibfttranstype":1,"ext":"Người nhận:${info.bank_holder_name}\\tNgân hàng:${config_bank.bankcode}\\tSố tài khoản:**** ${numberBank4}","number":"","bcbankcode":"${config_bank.bcbankcode}","bimid":"","bimtoken":"","first6no":"${first6}","last4no":"${numberBank4}"}`;
-        const assets = await this.assets_bank_web(order);
-        let source_of_fund = null;
-        if (assets && assets.data) {
-            if (assets.data.source_of_fund) source_of_fund = assets.data.source_of_fund;
-            else if (assets.data.sources_of_fund && assets.data.sources_of_fund.length > 0) source_of_fund = assets.data.sources_of_fund[0];
-        }
-        if (!source_of_fund || Number(source_of_fund.balance) < Number(amount)) {
-            return { status: 'error', message: assets?.error?.details?.localized_message?.message || 'Lỗi số dư' };
-        }
-        const pay = await this.pay_bank_web(assets);
-        if (pay && pay.data && pay.data.is_processing) {
-            return { status: 'success', message: 'Chuyển bank thành công', data: { zp_trans_id: pay.data.zp_trans_id } };
-        }
-        return { status: 'error', message: pay?.error?.details?.localized_message?.message || 'Lỗi chuyển' };
     }
 }
 
-// ===== API =====
-app.get('/api/accounts', async (req, res) => {
-    try {
-        const accounts = await getAccounts();
-        res.json({ status: 'success', data: accounts });
-    } catch (e) {
-        res.json({ status: 'error', msg: e.message });
+// ======================
+// VÒNG LẶP TỰ ĐỘNG
+// ======================
+async function autoUpdate() {
+    while (true) {
+        await fetchBaccaratData();
+        updatePredictionsAndCheckResults();
+        await new Promise(resolve => setTimeout(resolve, 2000));
     }
-});
-function randomString(length) {
-    let chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let str = '';
-    for (let i = 0; i < length; i++) str += chars.charAt(Math.floor(Math.random() * chars.length));
-    return str;
 }
-app.post('/api.php', async (req, res) => {
-    try {
-        const action = req.body.action || '';
-        const z = new Zalopay();
-        switch (action) {
-            case 'LOGIN': {
-                const { phone, password, cookie } = req.body;
-                if (!phone || !password || !cookie) return res.json({ status: 'error', msg: 'Nhập đủ SĐT, Mật khẩu, Cookie' });
-                const token_api = crypto.createHash('md5').update(randomString(6) + Date.now()).digest('hex');
-                let account = await getAccountByPhone(phone);
-                if (account) {
-                    account.type_api = 'web';
-                    account.cookie = cookie;
-                    account.status = 'pending';
-                } else {
-                    account = { phone, type_api: 'web', cookie, status: 'pending', userID: 1, token_api, id: Date.now().toString() };
-                }
-                await saveAccount(account);
-                z.loadData(account);
-                const info = await z.ZaloLogin_Cookie();
-                if (!info.error && info.data) {
-                    account.password = password;
-                    account.name = info.data.display_name;
-                    account.avatar = info.data.avatar;
-                    account.zalo_id = info.data.zalo_id;
-                    account.user_id = info.data.zalopay_id;
-                    account.profile_level = info.data.profile_level;
-                    account.status = 'success';
-                    account.errorDesc = 'Thành Công';
-                    account.time_login = Math.floor(Date.now() / 1000);
-                    const balanceReq = await z.getBalance_web();
-                    if (balanceReq?.data?.balance !== undefined) account.balance = balanceReq.data.balance;
-                    await saveAccount(account);
-                    return res.json({ status: 'success', msg: 'Đăng nhập thành công' });
-                } else {
-                    account.status = 'error';
-                    account.errorDesc = 'Cookie Không Hợp Lệ';
-                    await saveAccount(account);
-                    return res.json({ status: 'error', msg: 'Cookie Không Hợp Lệ hoặc Lỗi login' });
-                }
-            }
-            case 'RELOADBALANCE': {
-                const { id } = req.body;
-                const account = await getAccountById(id);
-                if (!account) return res.json({ status: 'error', msg: 'Tài khoản không tồn tại' });
-                z.loadData(account);
-                const balanceReq = await z.getBalance_web();
-                if (!balanceReq.error) {
-                    const month = new Date().getMonth() + 1;
-                    const year = new Date().getFullYear();
-                    const revenue = await z.income_outcome_web(month, year);
-                    if (revenue?.data?.income_outcome?.length > 0) {
-                        account.receive_mon = revenue.data.income_outcome[0].income_amount || 0;
-                        account.ex_mon = revenue.data.income_outcome[0].outcome_amount || 0;
-                    }
-                    if (balanceReq.data?.balance !== undefined) account.balance = balanceReq.data.balance;
-                    await saveAccount(account);
-                    return res.json({ status: 'success', msg: `Cập nhật số dư: ${account.balance}đ` });
-                } else {
-                    account.status = 'out';
-                    account.errorDesc = 'Cookie Die';
-                    await saveAccount(account);
-                    return res.json({ status: 'error', msg: 'Lỗi lấy số dư (Cookie có thể đã chết)' });
-                }
-            }
-            case 'history': {
-                const { phone } = req.body;
-                const account = await getAccountByPhone(phone);
-                if (!account) return res.json({ status: 'error', msg: 'Không tìm thấy tài khoản', transactions: [] });
-                z.loadData(account);
-                const history = await z.getTransactions2_optimized();
-                return res.json(history);
-            }
-            case 'update': {
-                const { phone, cookie } = req.body;
-                if (!phone || !cookie) return res.json({ status: 'error', msg: 'Thiếu thông tin' });
-                const account = await getAccountByPhone(phone);
-                if (account) {
-                    account.cookie = cookie;
-                    account.time_login = Math.floor(Date.now() / 1000);
-                    account.status = 'pending';
-                    await saveAccount(account);
-                    return res.json({ status: 'success', msg: 'Cập nhật cookie thành công' });
-                }
-                return res.json({ status: 'error', msg: 'Tài khoản không tồn tại' });
-            }
-            case 'REMOVE': {
-                const { id } = req.body;
-                await removeAccount(id);
-                return res.json({ status: 'success', msg: 'Đã xóa tài khoản' });
-            }
-            case 'transfer': {
-                const { receiver, account: phone, amount, comment, password } = req.body;
-                if (!receiver || !phone || !amount || !password) return res.json({ status: 'error', msg: 'Thiếu thông tin' });
-                const account = await getAccountByPhone(phone);
-                if (!account) return res.json({ status: 'error', msg: 'Tài khoản không tồn tại' });
-                if (account.password !== password) return res.json({ status: 'error', msg: 'Mật khẩu sai' });
-                z.loadData(account);
-                const send = await z.SendMoney_web(receiver, comment, amount);
-                if (send.status === 'error') {
-                    return res.json({ status: 'error', msg: send.message });
-                } else {
-                    const balanceReq = await z.getBalance_web();
-                    if (!balanceReq.error && balanceReq.data?.balance !== undefined) {
-                        account.balance = balanceReq.data.balance;
-                        await saveAccount(account);
-                    }
-                    await logTransaction({
-                        type_gd: 'sendmoney', tranId: send.data.zp_trans_id,
-                        partnerId: receiver, amount, comment, status: 'success',
-                        message: 'Chuyển Tiền Thành Công', user_id: 1
-                    });
-                    return res.json({ status: 'success', msg: `Chuyển thành công. Số dư: ${account.balance || 0}` });
-                }
-            }
-            case 'CreateQR': {
-                const { id, amount } = req.body;
-                const account = await getAccountById(id);
-                if (!account) return res.json({ status: 'error', msg: 'Acc không tồn tại' });
-                z.loadData(account);
-                const qr = await z.Create_QR_web(amount, '');
-                return res.json({ status: 'success', msg: 'OK', data: qr });
-            }
-            case 'NameBank': {
-                const { phone, stk, bank } = req.body;
-                const account = await getAccountByPhone(phone);
-                if (!account) return res.json({ status: 'error', msg: 'Acc không tồn tại' });
-                const data_config = bank.split('-');
-                z.loadData(account);
-                const nameInfo = await z.get_name_bank_web(stk, data_config[1]);
-                if (nameInfo.error || !nameInfo.bank_holder_name) {
-                    return res.json({ status: 'error', msg: 'Lỗi không xác định hoặc không tìm thấy tên' });
-                }
-                return res.json({ status: 'success', msg: nameInfo.bank_holder_name, data: nameInfo });
-            }
-            case 'transfer_bank': {
-                const { account: phone, stk, bank, amount, comment, password, name } = req.body;
-                if (!phone || !stk || !amount || !password) return res.json({ status: 'error', msg: 'Thiếu thông tin' });
-                const account = await getAccountByPhone(phone);
-                if (!account) return res.json({ status: 'error', msg: 'Acc lỗi' });
-                if (account.password !== password) return res.json({ status: 'error', msg: 'Sai mật khẩu' });
-                const data_bank = bank.split('-');
-                const config_bank = { bankcode: data_bank[1], bcbankcode: data_bank[0] };
-                z.loadData(account);
-                const send = await z.SendMoney_Bank_web(stk, amount, comment, config_bank);
-                if (send.status === 'error') {
-                    return res.json({ status: 'error', msg: send.message });
-                } else {
-                    const balanceReq = await z.getBalance_web();
-                    if (!balanceReq.error && balanceReq.data?.balance !== undefined) {
-                        account.balance = balanceReq.data.balance;
-                        await saveAccount(account);
-                    }
-                    await logTransaction({
-                        type_gd: 'sendbank', tranId: send.data.zp_trans_id,
-                        partnerId: stk, partnerName: name, amount, comment, status: 'success',
-                        user_id: 1
-                    });
-                    return res.json({ status: 'success', msg: `Chuyển Bank thành công. Số dư: ${account.balance || 0}` });
-                }
-            }
-            case 'ANTI': {
-                const { phone, status, ip } = req.body;
-                const account = await getAccountByPhone(phone);
-                if (account) {
-                    account.ip_white = ip;
-                    account.status_ip_white = status;
-                    await saveAccount(account);
-                    return res.json({ status: 'success', msg: 'Cập nhật cấu hình IP thành công' });
-                }
-                return res.json({ status: 'error', msg: 'Tài khoản không tồn tại' });
-            }
-            default: return res.json({ status: 'error', msg: 'Unknown Action' });
-        }
-    } catch (e) {
-        return res.json({ status: 'error', msg: `Lỗi Server: ${e.message}`, stack: e.stack });
-    }
+
+// ======================
+// API SERVER (Express)
+// ======================
+const app = express();
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', '*');
+    next();
 });
 
-// ===== HTML =====
-const HTML = `<!DOCTYPE html>
+// Endpoint tất cả bàn
+app.get('/api/baccarat', (req, res) => {
+    res.json({
+        success: true,
+        data: baccaratData,
+        lastUpdate: lastUpdate,
+        total: baccaratData.length
+    });
+});
+
+// Endpoint theo tên bàn
+app.get('/api/baccarat/:table', (req, res) => {
+    const tableName = req.params.table;
+    const found = baccaratData.find(item => item.table === tableName);
+    if (found) res.json({ success: true, data: found });
+    else res.json({ success: false, message: `Không tìm thấy bàn ${tableName}` });
+});
+
+// Endpoint dự đoán (JSON) – hiện rõ AI state nếu dùng AI
+app.get('/predict', (req, res) => {
+    const predArray = Object.values(predictions).map(p => ({
+        ...p,
+        next_session: p.session,
+        ai: p.ai_used ? {
+            state: p.ai_state,
+            action: p.ai_action,
+        } : null
+    }));
+    res.json({
+        success: true,
+        data: predArray,
+        total: predArray.length,
+        lastUpdate: lastUpdate,
+        ai_model_size: Object.keys(aiModel).length,
+        ai_training_sessions: aiTrainingCount
+    });
+});
+
+// Endpoint giao diện realtime đẹp (có hiển thị AI)
+app.get('/api/check', (req, res) => {
+    const html = `
+<!DOCTYPE html>
 <html lang="vi">
 <head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quản Lý ZaloPay Cá Nhân</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Baccarat AI VIP Prediction</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { background-color: #f0f2f5; font-family: 'Inter', sans-serif; }
-        .card-zalo { border: none; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; transition: transform 0.2s; }
-        .card-zalo:hover { transform: translateY(-5px); }
-        .zalo-header { background: #0068ff; color: white; border-radius: 15px 15px 0 0; padding: 15px; }
-        .avatar-zalo { width: 60px; height: 60px; border-radius: 50%; border: 2px solid white; object-fit: cover; }
-        .balance-text { font-size: 1.2rem; font-weight: bold; color: #28a745; }
-        .loader { border: 4px solid #f3f3f3; border-radius: 50%; border-top: 4px solid #0068ff; width: 30px; height: 30px; animation: spin 1s linear infinite; display: inline-block; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .table-dark-custom { background: #161b22; border-collapse: separate; border-spacing: 0; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        .table-dark-custom th { background: #21262d; color: #58a6ff; border-bottom: 2px solid #30363d; }
+        .table-dark-custom td { border-bottom: 1px solid #21262d; vertical-align: middle; }
+        .prediction-P { color: #3fb950; font-weight: bold; }
+        .prediction-B { color: #f85149; font-weight: bold; }
+        .ai-badge { background: #6e40c9; color: white; font-size: 0.7rem; border-radius: 4px; padding: 2px 5px; }
+        .fade-in { animation: fadeIn 0.5s; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body>
-<div class="container py-5">
-    <h3 class="text-center mb-4 text-primary fw-bold"><i class="fa-solid fa-wallet"></i> NODE.JS API BANK: ZALOPAY</h3>
-    <div class="row justify-content-center mb-5">
-        <div class="col-md-8">
-            <div class="card card-zalo">
-                <div class="card-body">
-                    <h5 class="card-title text-center mb-3">Thêm Tài Khoản Mới</h5>
-                    <form id="loginForm">
-                        <input type="hidden" name="action" value="LOGIN">
-                        <div class="row g-2">
-                            <div class="col-md-4"><input type="text" class="form-control" name="phone" placeholder="Số điện thoại" required></div>
-                            <div class="col-md-4"><input type="text" class="form-control" name="password" placeholder="Mật khẩu ví" required></div>
-                            <div class="col-md-12"><textarea class="form-control" name="cookie" rows="2" placeholder="Dán Cookie vào đây" required></textarea></div>
-                        </div>
-                        <button type="submit" class="btn btn-primary w-100 mt-3"><i class="fa-solid fa-plus"></i> Thêm / Cập nhật</button>
-                    </form>
-                </div>
-            </div>
+    <div class="container py-4">
+        <h2 class="mb-3">🎰 Baccarat Prediction <span class="text-warning">AI VIP</span></h2>
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span class="refresh-time">Cập nhật 2s | AI đã học: <span id="aiCount">0</span> phiên</span>
+            <span class="badge bg-success" id="statusBadge">Live</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-dark-custom table-hover">
+                <thead>
+                    <tr>
+                        <th>Bàn</th>
+                        <th>Kết quả hiện tại</th>
+                        <th>Dự đoán</th>
+                        <th>Độ tin cậy</th>
+                        <th>Phương pháp</th>
+                        <th>Phiên tiếp</th>
+                    </tr>
+                </thead>
+                <tbody id="predictionBody">
+                    <tr><td colspan="6" class="text-center text-muted">Đang tải dữ liệu...</td></tr>
+                </tbody>
+            </table>
         </div>
     </div>
-    <div class="row" id="accountsList">
-        <div class="col-12 text-center text-muted py-5"><div class="loader"></div><br><small>Đang tải tài khoản...</small></div>
-    </div>
-</div>
-<!-- Modals -->
-<div class="modal fade" id="modalTransfer" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
-    <div class="modal-header"><h5 class="modal-title">Chuyển Tiền ZaloPay</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-    <div class="modal-body">
-        <form id="formTransfer">
-            <input type="hidden" name="action" value="transfer">
-            <input type="hidden" name="account" id="tf_account">
-            <input type="hidden" name="password" id="tf_password">
-            <div class="mb-3"><label>Người nhận (SĐT)</label><input type="text" name="receiver" class="form-control" required></div>
-            <div class="mb-3"><label>Số tiền</label><input type="number" name="amount" class="form-control" required></div>
-            <div class="mb-3"><label>Lời nhắn</label><input type="text" name="comment" class="form-control" value="Chuyen tien"></div>
-            <button type="submit" class="btn btn-primary w-100">Gửi Tiền</button>
-        </form>
-    </div>
-</div></div></div>
 
-<div class="modal fade" id="modalBank" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
-    <div class="modal-header"><h5 class="modal-title">Chuyển Tiền Ngân Hàng</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-    <div class="modal-body">
-        <form id="formBank">
-            <input type="hidden" name="action" value="transfer_bank">
-            <input type="hidden" name="account" id="bk_account">
-            <input type="hidden" name="password" id="bk_password">
-            <input type="hidden" name="name" id="bk_name_hidden"> 
-            <div class="mb-3">
-                <label>Chọn Ngân Hàng</label>
-                <select name="bank" id="bk_bank_select" class="form-select"><option value="">Đang tải...</option></select>
-            </div>
-            <div class="mb-3">
-                <label>Số Tài Khoản</label>
-                <div class="input-group">
-                    <input type="text" name="stk" id="bk_stk" class="form-control" required>
-                    <button class="btn btn-outline-secondary" type="button" onclick="checkNameBank()">Check Tên</button>
-                </div>
-            </div>
-            <div class="mb-3"><label>Tên Người Nhận</label><input type="text" id="bk_name_display" class="form-control" readonly style="background-color:#e9ecef;"></div>
-            <div class="mb-3"><label>Số tiền</label><input type="number" name="amount" class="form-control" required></div>
-            <div class="mb-3"><label>Lời nhắn</label><input type="text" name="comment" class="form-control" value="Chuyen khoan"></div>
-            <button type="submit" class="btn btn-warning w-100">Chuyển Khoản</button>
-        </form>
-    </div>
-</div></div></div>
-
-<div class="modal fade" id="modalHistory" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">
-    <div class="modal-header"><h5 class="modal-title">Lịch Sử Giao Dịch</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-    <div class="modal-body">
-        <table class="table table-bordered table-striped"><thead><tr><th>Mã GD</th><th>Thời gian</th><th>Số tiền</th><th>Nội dung</th></tr></thead><tbody id="historyBody"></tbody></table>
-    </div>
-</div></div></div>
-
-<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-const API_URL = '/api.php';
-const API_ACCOUNTS = '/api/accounts';
-function loadAccounts() {
-    $.getJSON(API_ACCOUNTS, function(res) {
-        if (res.status === 'success') {
-            const arr = res.data;
-            const container = $('#accountsList');
-            container.empty();
-            if (arr.length === 0) { container.html('<div class="col-12 text-center text-muted py-5">Chưa có tài khoản nào.</div>'); return; }
-            arr.forEach(row => {
-                const statusBadge = row.status === 'success' ? '<span class="badge bg-success">Live</span>' : '<span class="badge bg-danger">Die</span>';
-                const avatar = row.avatar || 'https://via.placeholder.com/60';
-                const name = row.name || 'Chưa có tên';
-                const timeUpdate = new Date((row.time_login || 0) * 1000).toLocaleString();
-                container.append(\`
-                    <div class="col-md-6 col-lg-4">
-                        <div class="card card-zalo">
-                            <div class="zalo-header d-flex align-items-center justify-content-between">
-                                <div class="d-flex align-items-center">
-                                    <img src="\${avatar}" class="avatar-zalo me-2">
-                                    <div><h6 class="m-0">\${name}</h6><small>\${row.phone}</small></div>
-                                </div>
-                                \${statusBadge}
-                            </div>
-                            <div class="card-body">
-                                <p class="mb-1">Số dư: <span class="balance-text">\${formatMoney(row.balance || 0)}</span></p>
-                                <p class="mb-1 text-muted small">Cập nhật: \${timeUpdate}</p>
-                                <hr>
-                                <div class="d-grid gap-2">
-                                    <button onclick="reloadBalance('\${row.id}')" class="btn btn-outline-primary btn-sm"><i class="fa-solid fa-rotate"></i> Cập nhật số dư</button>
-                                    <div class="btn-group">
-                                        <button onclick="openModalTransfer('\${row.phone}', '\${row.password}')" class="btn btn-success btn-sm"><i class="fa-solid fa-paper-plane"></i> Chuyển Zalo</button>
-                                        <button onclick="openModalBank('\${row.phone}', '\${row.password}')" class="btn btn-warning btn-sm"><i class="fa-solid fa-building-columns"></i> Chuyển Bank</button>
-                                    </div>
-                                    <button onclick="viewHistory('\${row.phone}')" class="btn btn-info btn-sm text-white"><i class="fa-solid fa-clock-rotate-left"></i> Lịch sử GD</button>
-                                    <button onclick="removeAcc('\${row.id}')" class="btn btn-danger btn-sm"><i class="fa-solid fa-trash"></i> Xóa</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                \`);
-            });
-        }
-    });
-}
-$(document).ready(function() { 
-    loadAccounts(); 
-    $.getJSON('https://api.vietqr.io/v2/banks', function(res) {
-        if (res.code === "00" && res.data) {
-            let options = '';
-            res.data.forEach(function(bank) {
-                if (bank.transferSupported === 1) {
-                    let val = bank.bin + '-' + bank.code + '-' + bank.shortName + '-' + bank.name;
-                    options += '<option value="' + val + '">' + bank.shortName + ' (' + bank.name + ')</option>';
+    <script>
+        async function fetchPredictions() {
+            try {
+                const res = await fetch('/predict');
+                const json = await res.json();
+                if (json.success) {
+                    renderTable(json.data);
+                    document.getElementById('aiCount').textContent = json.ai_training_sessions || 0;
+                    document.getElementById('statusBadge').textContent = 'Live';
+                    document.getElementById('statusBadge').className = 'badge bg-success';
                 }
-            });
-            $('#bk_bank_select').html(options);
-        } else {
-            $('#bk_bank_select').html('<option value="">Lỗi tải danh sách NH</option>');
+            } catch (err) {
+                console.error(err);
+                document.getElementById('statusBadge').textContent = 'Lỗi';
+                document.getElementById('statusBadge').className = 'badge bg-danger';
+            }
         }
-    });
-});
-$('#loginForm').submit(function(e){
-    e.preventDefault();
-    Swal.fire({title: 'Đang xử lý...', didOpen: () => { Swal.showLoading() }});
-    $.post(API_URL, $(this).serialize(), function(res){
-        if(res.status == 'success'){
-            Swal.fire('Thành công', res.msg, 'success').then(() => loadAccounts());
-        } else {
-            Swal.fire('Lỗi', res.msg, 'error');
+
+        function renderTable(data) {
+            const tbody = document.getElementById('predictionBody');
+            if (!data.length) {
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Không có dữ liệu</td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.map(item => {
+                const predClass = item.predicted_result === 'P' ? 'prediction-P' : (item.predicted_result === 'B' ? 'prediction-B' : '');
+                const confColor = item.confidence > 70 ? 'bg-success' : (item.confidence > 55 ? 'bg-warning text-dark' : 'bg-secondary');
+                let methodHtml = item.method;
+                if (item.ai) {
+                    methodHtml += \` <span class="ai-badge">AI \${item.ai.action}</span>\`;
+                }
+                return \`
+                <tr class="fade-in">
+                    <td><strong>\${item.table}</strong></td>
+                    <td><code>\${item.current_result?.slice(-12) || '---'}</code></td>
+                    <td><span class="\${predClass}">\${item.predicted_result}</span></td>
+                    <td><span class="badge \${confColor}">\${item.confidence}%</span></td>
+                    <td><small>\${methodHtml}</small></td>
+                    <td><strong>#\${item.next_session}</strong></td>
+                </tr>\`;
+            }).join('');
         }
-    });
-});
-function reloadBalance(id){
-    Swal.fire({title: 'Đang cập nhật...', didOpen: () => { Swal.showLoading() }});
-    $.post(API_URL, {action: 'RELOADBALANCE', id: id}, function(res){
-        if(res.status == 'success'){
-            Swal.fire('Xong', res.msg, 'success').then(() => loadAccounts());
-        } else { Swal.fire('Lỗi', res.msg, 'error'); }
-    });
-}
-function viewHistory(phone){
-    $('#modalHistory').modal('show');
-    $('#historyBody').html('<tr><td colspan="4" class="text-center">Đang tải...</td></tr>');
-    $.post(API_URL, {action: 'history', phone: phone}, function(res){
-        if(res.status == 'success' && res.transactions){
-            let html = '';
-            res.transactions.forEach(item => {
-                let money = item.type === 'IN' ? '<span class="text-success">+'+formatMoney(item.amount)+'</span>' : '<span class="text-danger">-'+formatMoney(item.amount)+'</span>';
-                html += '<tr><td><small>'+item.transactionID+'</small></td><td><small>'+item.transactionDate+'</small></td><td>'+money+'</td><td><small>'+item.description+'</small></td></tr>';
-            });
-            $('#historyBody').html(html);
-        } else {
-            $('#historyBody').html('<tr><td colspan="4" class="text-center text-danger">'+res.msg+'</td></tr>');
-        }
-    });
-}
-function openModalTransfer(phone, pass){ $('#tf_account').val(phone); $('#tf_password').val(pass); $('#modalTransfer').modal('show'); }
-$('#formTransfer').submit(function(e){
-    e.preventDefault();
-    Swal.fire({title: 'Xác nhận', text: 'Chuyển tiền?', icon:'warning', showCancelButton:true, confirmButtonText:'Có'}).then((result)=>{
-        if(result.isConfirmed){
-            Swal.fire({title:'Đang chuyển...', didOpen: ()=>{Swal.showLoading()}});
-            $.post(API_URL, $('#formTransfer').serialize(), function(res){
-                if(res.status=='success'){ $('#modalTransfer').modal('hide'); Swal.fire('Thành công', res.msg, 'success').then(()=>loadAccounts()); }
-                else { Swal.fire('Thất bại', res.msg, 'error'); }
-            });
-        }
-    });
-});
-function openModalBank(phone, pass){ $('#bk_account').val(phone); $('#bk_password').val(pass); $('#modalBank').modal('show'); $('#bk_name_display').val(''); $('#bk_name_hidden').val(''); $('#bk_stk').val(''); }
-function checkNameBank(){
-    let phone = $('#bk_account').val();
-    let stk = $('#bk_stk').val();
-    let bank = $('#bk_bank_select').val();
-    if(!stk) { Swal.fire('Lỗi', 'Nhập số tài khoản trước', 'error'); return; }
-    $('#bk_name_display').val('Đang kiểm tra...');
-    $.post(API_URL, {action: 'NameBank', phone: phone, stk: stk, bank: bank}, function(res){
-        if(res.status == 'success'){ $('#bk_name_display').val(res.msg); $('#bk_name_hidden').val(res.msg); Swal.fire({toast:true, position:'top-end', showConfirmButton:false, timer:3000, icon:'success', title:'Đã check tên!'}); }
-        else { $('#bk_name_display').val('Không tìm thấy tên'); Swal.fire('Lỗi', res.msg, 'error'); }
-    });
-}
-$('#formBank').submit(function(e){
-    e.preventDefault();
-    if($('#bk_name_hidden').val() == '') { Swal.fire('Chú ý', 'Check Tên trước!', 'warning'); return; }
-    Swal.fire({title:'Xác nhận', text:'Chuyển cho '+$('#bk_name_hidden').val()+'?', icon:'info', showCancelButton:true, confirmButtonText:'Chuyển'}).then((result)=>{
-        if(result.isConfirmed){
-            Swal.fire({title:'Đang xử lý...', didOpen: ()=>{Swal.showLoading()}});
-            $.post(API_URL, $('#formBank').serialize(), function(res){
-                if(res.status=='success'){ $('#modalBank').modal('hide'); Swal.fire('Thành công', res.msg, 'success').then(()=>loadAccounts()); }
-                else { Swal.fire('Thất bại', res.msg, 'error'); }
-            });
-        }
-    });
-});
-function removeAcc(id){
-    Swal.fire({title:'Xóa?', text:'Xóa tài khoản?', icon:'warning', showCancelButton:true, confirmButtonText:'Xóa'}).then((result)=>{
-        if(result.isConfirmed){ $.post(API_URL, {action:'REMOVE', id:id}, function(){ Swal.fire('Đã xóa', '', 'success').then(()=>loadAccounts()); }); }
-    });
-}
-function formatMoney(amount) { return new Intl.NumberFormat('vi-VN', {style:'currency', currency:'VND'}).format(amount); }
-</script>
+
+        fetchPredictions();
+        setInterval(fetchPredictions, 2000);
+    </script>
 </body>
 </html>`;
-
-app.get('/', (req, res) => res.send(HTML));
-
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ALL-IN-ONE ZaloPay server running on http://0.0.0.0:${PORT}`);
+    res.send(html);
 });
+
+// Endpoint lịch sử dự đoán (có thống kê AI)
+app.get('/ls', (req, res) => {
+    const tableFilter = req.query.table;
+    let filtered = history;
+    if (tableFilter) {
+        filtered = history.filter(h => h.table === tableFilter);
+    }
+    const withResult = filtered.filter(h => h.actual_result !== null);
+    withResult.sort((a, b) => new Date(b.result_at) - new Date(a.result_at));
+    const limited = withResult.slice(0, 200);
+    
+    const total = limited.length;
+    const correct = limited.filter(h => h.is_correct === true).length;
+    const wrong = limited.filter(h => h.is_correct === false).length;
+    const winRate = total > 0 ? ((correct / total) * 100).toFixed(1) : '0.0';
+    
+    // Đếm tỉ lệ thắng của AI vs luật
+    const aiPredictions = limited.filter(h => h.ai_state);
+    const aiCorrect = aiPredictions.filter(h => h.is_correct).length;
+    const aiWinRate = aiPredictions.length > 0 ? ((aiCorrect / aiPredictions.length) * 100).toFixed(1) : 'N/A';
+
+    res.json({
+        success: true,
+        data: limited,
+        stats: {
+            total,
+            correct,
+            wrong,
+            winRate: winRate + '%',
+            ai_predictions: aiPredictions.length,
+            ai_winRate: aiWinRate + '%'
+        }
+    });
+});
+
+// ======================
+// KHỞI ĐỘNG
+// ======================
+async function start() {
+    console.log('========================================');
+    console.log('BACCARAT AI VIP PREDICTION SERVER');
+    console.log(`Tài khoản: ${USERNAME}`);
+    console.log('========================================');
+
+    console.log('[1] Đăng nhập...');
+    const loginOk = await login();
+    if (!loginOk) {
+        console.error('[ERROR] Đăng nhập thất bại!');
+        process.exit(1);
+    }
+
+    console.log('[2] Vào lobby...');
+    await goToLobby();
+
+    console.log('[3] Lấy dữ liệu lần đầu...');
+    await fetchBaccaratData();
+    if (baccaratData.length === 0) {
+        console.warn('[CẢNH BÁO] Không lấy được bàn nào.');
+    } else {
+        updatePredictionsAndCheckResults();
+        baccaratData.forEach(item => {
+            const pred = predictions[item.table];
+            if (pred) {
+                const aiTag = pred.ai_state ? ' [AI]' : '';
+                console.log(`   ${item.table.padEnd(5)} : Dự đoán ${pred.predicted_result} (${pred.confidence}%) - ${pred.method} [Phiên #${pred.session}]${aiTag}`);
+            }
+        });
+    }
+
+    autoUpdate();
+
+    const PORT = 5000;
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`\n🚀 SERVER ĐANG CHẠY:`);
+        console.log(`   Dự đoán JSON : http://localhost:${PORT}/predict`);
+        console.log(`   Giao diện    : http://localhost:${PORT}/api/check`);
+        console.log(`   Lịch sử      : http://localhost:${PORT}/ls`);
+        console.log(`   Lịch sử bàn  : http://localhost:${PORT}/ls?table=1`);
+        console.log(`   Data gốc     : http://localhost:${PORT}/api/baccarat`);
+        console.log(`\n🧠 AI tự học trên 1000 phiên gần nhất – đang chạy...`);
+    });
+}
+
+start();
