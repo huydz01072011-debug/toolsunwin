@@ -1,7 +1,7 @@
 {
-  "name": "zalopay-vip",
+  "name": "zalopay-all-in-one",
   "version": "1.0.0",
-  "description": "Web nhập token lấy info ZaloPay, có hiển thị lỗi JSON đầy đủ",
+  "description": "All-in-one ZaloPay tool gộp server, API, class và giao diện",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,8 +9,9 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.6.0",
-    "body-parser": "^1.20.2"
+    "cors": "^2.8.6",
+    "body-parser": "^1.20.2",
+    "axios": "^1.6.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
