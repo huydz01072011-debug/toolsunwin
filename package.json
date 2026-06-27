@@ -1,24 +1,20 @@
 {
-  "name": "zalopay-api",
+  "name": "zalopay-vip",
   "version": "1.0.0",
-  "description": "ZaloPay API quản lý tài khoản và chuyển tiền",
+  "description": "Web nhập token lấy info ZaloPay, có hiển thị lỗi JSON đầy đủ",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": ["zalopay", "api", "banking"],
-  "author": "D0XX1N9",
-  "license": "ISC",
   "dependencies": {
-    "axios": "^1.15.2",
-    "body-parser": "^2.2.2",
-    "cors": "^2.8.6",
-    "express": "^5.2.1",
-    "node-rsa": "^1.1.1",
-    "uuid": "^14.0.0"
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "body-parser": "^1.20.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
-  }
+  },
+  "author": "D0XX1N9",
+  "license": "UNLICENSED"
 }
