@@ -1,7 +1,7 @@
 {
   "name": "sunwin-tx-collector",
   "version": "1.0.0",
-  "description": "SUNWIN TX Collector & Predictor - Thu thập dữ liệu và dự đoán kết quả Tài Xỉu",
+  "description": "Thu thập dữ liệu và dự đoán Tài Xỉu Sunwin với LogicPen V4",
   "main": "sunphhuy.js",
   "scripts": {
     "start": "node server.js",
@@ -9,19 +9,19 @@
   },
   "keywords": [
     "sunwin",
-    "tx",
-    "tai-xiu",
-    "predictor",
+    "tai xiu",
+    "prediction",
     "collector",
-    "cau"
+    "logicpen"
   ],
-  "author": "SunWin TX",
+  "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.6.2"
+    "axios": "^1.6.0",
+    "express": "^4.18.2"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.1"
   },
   "engines": {
     "node": ">=14.0.0"
