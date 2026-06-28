@@ -1,20 +1,29 @@
 {
-  "name": "baccarat-ai-vip",
+  "name": "sunwin-tx-collector",
   "version": "1.0.0",
-  "description": "Baccarat AI VIP Prediction Server - tự học bắt cầu, dự đoán realtime",
-  "main": "server.js",
+  "description": "SUNWIN TX Collector & Predictor - Thu thập dữ liệu và dự đoán kết quả Tài Xỉu",
+  "main": "sunphhuy.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": ["baccarat", "prediction", "ai", "casino"],
-  "author": "VIP",
-  "license": "ISC",
+  "keywords": [
+    "sunwin",
+    "tx",
+    "tai-xiu",
+    "predictor",
+    "collector",
+    "cau"
+  ],
+  "author": "SunWin TX",
+  "license": "MIT",
   "dependencies": {
-    "axios": "^1.7.2",
-    "express": "^4.19.2"
+    "axios": "^1.6.2"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }

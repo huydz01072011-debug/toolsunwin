@@ -1,791 +1,999 @@
-// ============================================================
-// TSKHANG / OMEGA v3.0 - SIÊU THUẬT TOÁN BACCARAT + AI TỰ HỌC
-// Tác giả: Omega Unchained (nâng cấp toàn diện)
-// Phiên bản: 3.0 - Phân tích đa chiều + Học máy thích ứng
-// ============================================================
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const readline = require('readline');
 
-// ---------- PHẦN 1: LỚP PHÂN TÍCH ĐƯỜNG (ROAD) ----------
-class RoadAnalyzer {
+// --- Cấu hình tự động lấy URL API ---
+let API_URL = process.env.API_URL || null; // Sẽ được gán động trong collect()
+
+async function getAutoURL() {
+    // 1. Biến môi trường
+    if (process.env.API_URL) {
+        console.log(`🌐 Dùng API_URL từ môi trường: ${process.env.API_URL}`);
+        return process.env.API_URL;
+    }
+
+    // 2. File url_config.txt
+    const urlFile = path.join(__dirname, 'url_config.txt');
+    if (fs.existsSync(urlFile)) {
+        const url = fs.readFileSync(urlFile, 'utf-8').trim();
+        if (url) {
+            console.log(`🌐 Dùng URL từ file: ${url}`);
+            return url;
+        }
+    }
+
+    // 3. Tự quét localhost
+    const ports = [3000, 8080, 5000, 4000];
+    for (const port of ports) {
+        const testUrl = `http://127.0.0.1:${port}/api/tx`;
+        try {
+            const res = await axios.get(testUrl, { timeout: 3000 });
+            if (res.status === 200) {
+                console.log(`✅ Tìm thấy server local tại ${testUrl}`);
+                return testUrl;
+            }
+        } catch (e) {}
+    }
+
+    // 4. Fallback mặc định
+    console.warn('⚠️ Không tìm thấy server local, dùng URL mặc định: http://localhost:3000/api/tx');
+    return 'https://various-collaborative-heights-sue.trycloudflare.com/api/tx';
+}
+
+// --- Các hằng số & file ---
+const DATA_FILE = "collected_data/sunwin_tx.json";
+const STATS_FILE = "database/stats.json";
+const DETAILED_STATS_FILE = "database/detailed_stats.json";
+
+// Các giới hạn
+const MIN_DATA_FOR_PREDICTION = 10;
+const MAX_PREDICTIONS = 100000;
+const MAX_STORAGE = 1000000;
+const CHECK_INTERVAL = 60000; // 1 phút
+
+const vnNow = () => {
+    const d = new Date();
+    return new Date(d.getTime() + (7 * 60 * 60 * 1000)).toISOString();
+};
+
+// Tạo interface cho readline
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
+});
+
+// Biến toàn cục để lưu history
+let globalHistory = [];
+
+// Thống kê chi tiết
+let detailedStats = {
+    byPattern: {
+        'Đu Bệt': { total: 0, correct: 0, wrong: 0 },
+        'Bẻ Bệt Rồng': { total: 0, correct: 0, wrong: 0 },
+        'Cầu Nối 1-1': { total: 0, correct: 0, wrong: 0 },
+        'Cầu 2-2': { total: 0, correct: 0, wrong: 0 },
+        'Cầu 3-3': { total: 0, correct: 0, wrong: 0 },
+        'Gãy 3-2': { total: 0, correct: 0, wrong: 0 },
+        'Gãy 2-3': { total: 0, correct: 0, wrong: 0 },
+        'Gãy 1-2-1': { total: 0, correct: 0, wrong: 0 },
+        'Mẫu Lặp': { total: 0, correct: 0, wrong: 0 },
+        'Fibonacci': { total: 0, correct: 0, wrong: 0 }, // thêm loại mới
+        'Vị cực đại': { total: 0, correct: 0, wrong: 0 },
+        'Vị cực tiểu': { total: 0, correct: 0, wrong: 0 },
+        'Vị bão hòa': { total: 0, correct: 0, wrong: 0 },
+        'Vị cạn kiệt': { total: 0, correct: 0, wrong: 0 },
+        'Vị ổn định': { total: 0, correct: 0, wrong: 0 },
+        'Theo': { total: 0, correct: 0, wrong: 0 }
+    },
+    byConfidence: {
+        '0-50': { total: 0, correct: 0, wrong: 0 },
+        '51-60': { total: 0, correct: 0, wrong: 0 },
+        '61-70': { total: 0, correct: 0, wrong: 0 },
+        '71-80': { total: 0, correct: 0, wrong: 0 },
+        '81-90': { total: 0, correct: 0, wrong: 0 },
+        '91-100': { total: 0, correct: 0, wrong: 0 }
+    },
+    byPrediction: {
+        'TAI': { total: 0, correct: 0, wrong: 0 },
+        'XIU': { total: 0, correct: 0, wrong: 0 }
+    },
+    recentHistory: [],
+    summary: {
+        totalPredictions: 0,
+        totalCorrect: 0,
+        totalWrong: 0,
+        accuracy: 0,
+        bestStreak: 0,
+        worstStreak: 0,
+        currentStreak: 0,
+        lastUpdated: null
+    }
+};
+
+let stats = {
+    total: 0, correct: 0, wrong: 0,
+    last_prediction: null,
+    start_time: vnNow(),
+    history: [],
+    total_predictions_made: 0,
+    prediction_started: false,
+    current_streak: 0,
+    best_streak: 0,
+    worst_streak: 0
+};
+
+// =================== THUẬT TOÁN VIP ===================
+class TX_LogicPen_V5_VIP {
     constructor() {
-        this.bigEye = [];
-        this.smallRoad = [];
-        this.cockroach = [];
-    }
-
-    // Cập nhật đường dựa trên lịch sử kết quả (mảng ['B','P','T'])
-    update(history) {
-        if (history.length < 2) return;
-        const len = history.length;
-        const last = history[len - 1];
-        const prev = history[len - 2];
-
-        // Big Eye: so sánh kết quả hiện tại với ô trước đó trong cột
-        // Mô phỏng đơn giản: nếu khác => 'O' (đỏ), giống => 'S' (xanh)
-        this.bigEye.push(last === prev ? 'S' : 'O');
-
-        // Small Road: so sánh với ô cách 2 vị trí (theo quy tắc thực tế phức tạp hơn)
-        // Ở đây dùng đơn giản: nếu last === history[len-3] => 'S' else 'O'
-        if (len >= 3) {
-            this.smallRoad.push(last === history[len-3] ? 'S' : 'O');
-        }
-
-        // Cockroach: so sánh với ô cách 3 vị trí
-        if (len >= 4) {
-            this.cockroach.push(last === history[len-4] ? 'S' : 'O');
-        }
-
-        // Giới hạn kích thước để tránh tràn
-        if (this.bigEye.length > 200) this.bigEye.shift();
-        if (this.smallRoad.length > 200) this.smallRoad.shift();
-        if (this.cockroach.length > 200) this.cockroach.shift();
-    }
-
-    // Phân tích xu hướng đường để đưa ra gợi ý
-    analyze() {
-        const result = { bigEye: {}, smallRoad: {}, cockroach: {} };
-
-        // Tính tỉ lệ O/S trong 20 phiên gần nhất
-        const slice = (arr) => arr.slice(-20);
-        const calcRatio = (arr) => {
-            if (arr.length === 0) return { O: 0.5, S: 0.5 };
-            const total = arr.length;
-            const oCount = arr.filter(x => x === 'O').length;
-            return { O: oCount / total, S: (total - oCount) / total };
+        this.error_streak = 0;
+        this.last_prediction = null;
+        this.history = [];
+        this.last_pattern = null;
+        this.weights = {
+            'Đu Bệt': 1.0,
+            'Bẻ Bệt Rồng': 1.2,
+            'Cầu Nối 1-1': 1.1,
+            'Cầu 2-2': 1.05,
+            'Cầu 3-3': 1.15,
+            'Gãy 3-2': 0.9,
+            'Gãy 2-3': 0.9,
+            'Gãy 1-2-1': 0.85,
+            'Mẫu Lặp': 1.3,
+            'Fibonacci': 1.25,     // VIP
+            'Vị cực đại': 0.95,
+            'Vị cực tiểu': 0.95,
+            'Vị bão hòa': 0.8,
+            'Vị cạn kiệt': 0.8,
+            'Vị ổn định': 0.75,
+            'Theo': 0.6
         };
+    }
 
-        result.bigEye = calcRatio(slice(this.bigEye));
-        result.smallRoad = calcRatio(slice(this.smallRoad));
-        result.cockroach = calcRatio(slice(this.cockroach));
+    loadData(data) {
+        this.history = [...data].sort((a, b) => (b.phien || 0) - (a.phien || 0));
+    }
 
-        // Dự đoán dựa trên đường: nếu tỉ lệ O cao => khả năng đảo chiều
+    _arr() {
+        return this.history.map(s =>
+            (s.ket_qua || '').toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI')
+        );
+    }
+
+    _points() {
+        return this.history
+            .filter(s => s.tong !== undefined && s.tong !== null)
+            .map(s => s.tong);
+    }
+
+    // VIP: phát hiện chu kỳ Fibonacci
+    fiboAnalysis(arr) {
+        const fib = [1, 1, 2, 3, 5, 8, 13, 21];
+        const len = arr.length;
+        for (let f of fib) {
+            if (len >= f * 2) {
+                let pattern = arr.slice(0, f);
+                let match = true;
+                for (let i = f; i < len && i < f * 2; i++) {
+                    if (arr[i] !== pattern[i % f]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    const next = pattern[len % f];
+                    return { pred: next, conf: 86, type: "Fibonacci", reason: `Chu kỳ ${f} phiên` };
+                }
+            }
+        }
+        return null;
+    }
+
+    cauSap(arr) {
+        if (arr.length < 2) return null;
+        let length = 1;
+        for (let i = 1; i < arr.length; i++) {
+            if (arr[i] === arr[0]) length++;
+            else break;
+        }
+        if (length >= 2 && length <= 5) {
+            return { pred: arr[0], conf: 78, type: "Đu Bệt", reason: `Bệt ${length} phiên` };
+        }
+        if (length >= 6) {
+            return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 85, type: "Bẻ Bệt Rồng", reason: `Bệt dài ${length} → hồi` };
+        }
+        return null;
+    }
+
+    cauNoi(arr) {
+        if (arr.length < 5) return null;
+        for (let i = 0; i < 4; i++) {
+            if (arr[i] === arr[i + 1]) return null;
+        }
+        return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 85, type: "Cầu Nối 1-1", reason: "Nhịp 1-1 ổn định" };
+    }
+
+    cauDoi(arr) {
+        if (arr.length < 4) return null;
+        if (arr[0] === arr[1] && arr[2] === arr[3] && arr[0] !== arr[2]) {
+            return { pred: arr[2], conf: 80, type: "Cầu 2-2", reason: "AABB → B" };
+        }
+        if (arr.length >= 6 && arr[0] === arr[1] && arr[1] === arr[2] &&
+            arr[3] === arr[4] && arr[4] === arr[5] && arr[0] !== arr[3]) {
+            return { pred: arr[3], conf: 82, type: "Cầu 3-3", reason: "AAABBB → B" };
+        }
+        return null;
+    }
+
+    cauGay(arr) {
+        if (arr.length >= 5 && arr[0] === arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[3] === arr[4]) {
+            return { pred: arr[3], conf: 76, type: "Gãy 3-2", reason: "AAABB → B" };
+        }
+        if (arr.length >= 5 && arr[0] === arr[1] && arr[1] !== arr[2] && arr[2] === arr[3] && arr[3] === arr[4]) {
+            return { pred: arr[2], conf: 76, type: "Gãy 2-3", reason: "AABBB → B" };
+        }
+        if (arr.length >= 4 && arr[0] !== arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[0] === arr[3]) {
+            return { pred: arr[1], conf: 74, type: "Gãy 1-2-1", reason: "ABBA → B" };
+        }
+        return null;
+    }
+
+    phatHienMauLap(arr) {
+        if (arr.length < 6) return null;
+        for (let len = 2; len <= 4; len++) {
+            let pattern = arr.slice(0, len);
+            for (let i = len; i < arr.length - len; i++) {
+                let sub = arr.slice(i, i + len);
+                if (JSON.stringify(sub) === JSON.stringify(pattern) && arr[i - 1]) {
+                    return { pred: arr[i - 1], conf: 90, type: "Mẫu Lặp", reason: `Mẫu "${pattern.join(',')}"` };
+                }
+            }
+        }
+        return null;
+    }
+
+    duDoanVi() {
+        const points = this._points();
+        if (points.length < 5) return null;
+        const last = points[0], prev = points[1];
+        const slice = points.slice(0, 5);
+        const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
+        const variance = slice.reduce((sum, p) => sum + (p - avg) ** 2, 0) / slice.length;
+
+        if (last >= 15) return { pred: "XIU", conf: 80, type: "Vị cực đại", reason: `Điểm ${last} → hồi Xỉu` };
+        if (last <= 5) return { pred: "TAI", conf: 80, type: "Vị cực tiểu", reason: `Điểm ${last} → hồi Tài` };
+        if (avg > 11 && last > prev && variance < 2) return { pred: "XIU", conf: 72, type: "Vị bão hòa", reason: "Đà tăng chạm ngưỡng" };
+        if (avg < 10 && last < prev && variance < 2) return { pred: "TAI", conf: 72, type: "Vị cạn kiệt", reason: "Đà giảm chạm đáy" };
+        if (avg >= 11 && last >= 11 && last <= 13 && variance < 3) return { pred: "TAI", conf: 70, type: "Vị ổn định", reason: "Duy trì Tài nhẹ" };
+        if (avg <= 9 && last >= 7 && last <= 9 && variance < 3) return { pred: "XIU", conf: 70, type: "Vị ổn định", reason: "Duy trì Xỉu nhẹ" };
+        return null;
+    }
+
+    weightedCombine(predictions) {
+        if (predictions.length === 0) return null;
+        let best = predictions[0];
+        let bestScore = -Infinity;
+        for (let p of predictions) {
+            let w = this.weights[p.type] || 1.0;
+            let score = p.conf * w;
+            if (score > bestScore) {
+                bestScore = score;
+                best = p;
+            }
+        }
+        return best;
+    }
+
+    tongHopDuDoan() {
+        const arr = this._arr();
+        if (arr.length < 2) return null;
+        const candidates = [];
+
+        const fib = this.fiboAnalysis(arr);
+        if (fib) candidates.push(fib);
+        const m = this.phatHienMauLap(arr);
+        if (m) candidates.push(m);
+        const noi = this.cauNoi(arr);
+        if (noi) candidates.push(noi);
+        const doi = this.cauDoi(arr);
+        if (doi) candidates.push(doi);
+        const gay = this.cauGay(arr);
+        if (gay) candidates.push(gay);
+        const sap = this.cauSap(arr);
+        if (sap) candidates.push(sap);
+        const vi = this.duDoanVi();
+        if (vi) candidates.push(vi);
+        candidates.push({ pred: arr[0], conf: 55, type: "Theo", reason: "Bám phiên cuối" });
+
+        const best = this.weightedCombine(candidates);
+        if (best) this.last_pattern = best.type;
+        return best;
+    }
+
+    apDungDaoChieu(p) {
+        if (!p || this.history.length < 1) return p;
+        const currentResult = this._arr()[0];
+        if (this.error_streak >= 2 && this.last_prediction && this.last_prediction !== currentResult) {
+            return {
+                ...p,
+                pred: p.pred === "TAI" ? "XIU" : "TAI",
+                conf: Math.min(90, p.conf + 12),
+                reason: `🔄 Đảo: ${p.reason}`
+            };
+        }
+        return p;
+    }
+
+    predict(data) {
+        this.loadData(data);
+        let result = this.tongHopDuDoan();
+        if (result) result = this.apDungDaoChieu(result);
+        else result = { pred: this._arr()[0] || "TAI", conf: 50, type: "Theo", reason: "Không đủ dữ liệu" };
+        this.last_prediction = result.pred;
         return result;
     }
+
+    updateStatus(actual) {
+        if (this.last_prediction) {
+            const a = actual.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
+            if (this.last_prediction === a) this.error_streak = 0;
+            else this.error_streak++;
+        }
+    }
 }
 
-// ---------- PHẦN 2: LỚP OMEGA CẢI TIẾN (v3.0) ----------
-class TskhangOmegaAnynisthis {
-    constructor(options = {}) {
-        this.history = [];               // ['B','P','T']
-        this.streak = { type: null, length: 0 };
-        this.markov = new Map();         // transition counts
-        this.patterns = new Map();       // phát hiện mẫu
-        this.road = new RoadAnalyzer();  // phân tích đường
-        this.weights = {
-            markov: 1.0,
-            road: 0.8,
-            streak: 1.2,
-            pattern: 0.9,
-            chop: 0.7,
-            tie: 0.5
-        };
-        this.options = {
-            maxHistory: 500,
-            antiDetectVariance: 0.10,
-            tieBias: 0.08,
-            learningRate: 0.01,
-            ...options
-        };
-        // Bộ nhớ cho học máy đơn giản: lưu các đặc trưng và kết quả
-        this.features = [];   // mảng { state, prediction, actual, correct }
-        console.log("🧠 OMEGA v3.0 ĐÃ KÍCH HOẠT - SIÊU THUẬT TOÁN + AI TỰ HỌC");
+const predictor = new TX_LogicPen_V5_VIP();
+
+// --- Helper Functions ---
+function loadHistory() {
+    try {
+        if (fs.existsSync(DATA_FILE)) {
+            const content = fs.readFileSync(DATA_FILE, 'utf-8');
+            const data = JSON.parse(content);
+            return data.history || [];
+        }
+    } catch (e) {
+        console.error(`Lỗi đọc file: ${e.message}`);
+    }
+    return [];
+}
+
+function loadDetailedStats() {
+    try {
+        if (fs.existsSync(DETAILED_STATS_FILE)) {
+            const content = fs.readFileSync(DETAILED_STATS_FILE, 'utf-8');
+            return JSON.parse(content);
+        }
+    } catch (e) {
+        console.error(`Lỗi đọc file thống kê chi tiết: ${e.message}`);
+    }
+    return detailedStats;
+}
+
+function saveDetailedStats() {
+    const dir = path.dirname(DETAILED_STATS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    
+    detailedStats.summary.totalPredictions = stats.total;
+    detailedStats.summary.totalCorrect = stats.correct;
+    detailedStats.summary.totalWrong = stats.wrong;
+    detailedStats.summary.accuracy = stats.total > 0 ? (stats.correct / stats.total * 100) : 0;
+    detailedStats.summary.bestStreak = stats.best_streak;
+    detailedStats.summary.worstStreak = stats.worst_streak;
+    detailedStats.summary.currentStreak = stats.current_streak;
+    detailedStats.summary.lastUpdated = vnNow();
+    
+    fs.writeFileSync(DETAILED_STATS_FILE, JSON.stringify(detailedStats, null, 2));
+}
+
+function saveHistory(history) {
+    const dir = path.dirname(DATA_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    
+    const limitedHistory = history.slice(-MAX_STORAGE);
+    
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ 
+        history: limitedHistory,
+        total_sessions: limitedHistory.length,
+        max_storage: MAX_STORAGE,
+        last_updated: vnNow()
+    }, null, 2));
+    
+    console.log(`💾 Đã lưu ${limitedHistory.length}/${MAX_STORAGE} phiên dữ liệu`);
+}
+
+function saveStatsFile() {
+    const dir = path.dirname(STATS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(STATS_FILE, JSON.stringify({
+        ...stats,
+        total_predictions_made: stats.total_predictions_made,
+        max_predictions: MAX_PREDICTIONS,
+        min_data_required: MIN_DATA_FOR_PREDICTION,
+        max_storage: MAX_STORAGE,
+        prediction_started: stats.prediction_started,
+        current_streak: stats.current_streak,
+        best_streak: stats.best_streak,
+        worst_streak: stats.worst_streak,
+        last_updated: vnNow()
+    }, null, 2));
+}
+
+function updateDetailedStats(prediction, actual, pattern, confidence, correct) {
+    if (pattern && detailedStats.byPattern[pattern]) {
+        detailedStats.byPattern[pattern].total++;
+        if (correct) detailedStats.byPattern[pattern].correct++;
+        else detailedStats.byPattern[pattern].wrong++;
     }
 
-    // Thêm kết quả mới
-    addResult(result) {
-        if (!['B', 'P', 'T'].includes(result)) return console.error("Invalid result");
-        this.history.push(result);
-        if (this.history.length > this.options.maxHistory) this.history.shift();
-
-        this.updateStreak(result);
-        this.road.update(this.history);
-        this.updateMarkov(result);
-        this.analyzeAdvancedPatterns();
-        // Học từ kết quả mới (nếu có dự đoán trước đó)
-        this.learnFromResult(result);
+    let confRange = '0-50';
+    if (confidence > 50 && confidence <= 60) confRange = '51-60';
+    else if (confidence > 60 && confidence <= 70) confRange = '61-70';
+    else if (confidence > 70 && confidence <= 80) confRange = '71-80';
+    else if (confidence > 80 && confidence <= 90) confRange = '81-90';
+    else if (confidence > 90) confRange = '91-100';
+    
+    if (detailedStats.byConfidence[confRange]) {
+        detailedStats.byConfidence[confRange].total++;
+        if (correct) detailedStats.byConfidence[confRange].correct++;
+        else detailedStats.byConfidence[confRange].wrong++;
     }
 
-    updateStreak(result) {
-        if (this.history.length === 1) {
-            this.streak = { type: result, length: 1 };
+    const predKey = prediction.toUpperCase();
+    if (detailedStats.byPrediction[predKey]) {
+        detailedStats.byPrediction[predKey].total++;
+        if (correct) detailedStats.byPrediction[predKey].correct++;
+        else detailedStats.byPrediction[predKey].wrong++;
+    }
+
+    detailedStats.recentHistory.push({
+        phien: stats.last_prediction?.phien || 0,
+        prediction: prediction,
+        actual: actual,
+        pattern: pattern,
+        confidence: confidence,
+        correct: correct,
+        timestamp: vnNow()
+    });
+    
+    if (detailedStats.recentHistory.length > 1000) {
+        detailedStats.recentHistory = detailedStats.recentHistory.slice(-1000);
+    }
+
+    saveDetailedStats();
+}
+
+// --- LỆNH /dudoan ---
+function showPrediction(history) {
+    console.log('\n🎯 === DỰ ĐOÁN TIẾP THEO ===');
+    console.log('═══════════════════════════════════════════');
+    
+    if (!history || history.length < 5) {
+        console.log('❌ Chưa đủ dữ liệu để dự đoán (cần ít nhất 5 phiên)');
+        console.log(`📊 Hiện có: ${history ? history.length : 0} phiên`);
+        return;
+    }
+
+    try {
+        const r = predictor.predict(history);
+        const cur = history[history.length - 1];
+        let ph = cur.phien || 0;
+        if (typeof ph === 'string') {
+            const cleaned = ph.replace('#', '');
+            ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
+        }
+        const nextPhien = ph + 1;
+        
+        console.log(`📋 DỰA TRÊN ${history.length} PHIÊN GẦN NHẤT:`);
+        console.log(`\n🔮 DỰ ĐOÁN PHIÊN #${nextPhien}:`);
+        console.log(`   🎯 Kết quả: ${r.pred}`);
+        console.log(`   📊 Độ tin cậy: ${r.conf}%`);
+        console.log(`   📌 Loại cầu: ${r.type}`);
+        console.log(`   💬 Lý do: ${r.reason}`);
+        
+        console.log(`\n📜 10 PHIÊN GẦN NHẤT:`);
+        console.log('   ┌──────────┬────────────┬────────────┬─────────────┐');
+        console.log('   │ Phiên    │ Kết quả    │ Tổng điểm  │ Xúc xắc     │');
+        console.log('   ├──────────┼────────────┼────────────┼─────────────┤');
+        const recent = history.slice(-10).reverse();
+        for (const item of recent) {
+            const dice = `${item.xuc_xac_1||0},${item.xuc_xac_2||0},${item.xuc_xac_3||0}`;
+            console.log(`   │ ${String(item.phien).padStart(8)} │ ${(item.ket_qua || '').padEnd(10)} │ ${String(item.tong || 0).padStart(10)} │ ${dice.padEnd(11)} │`);
+        }
+        console.log('   └──────────┴────────────┴────────────┴─────────────┘');
+        
+        console.log('\n═══════════════════════════════════════════\n');
+        
+    } catch (e) {
+        console.error(`❌ Lỗi dự đoán: ${e.message}`);
+    }
+}
+
+// --- LỆNH /lichsu ---
+function showHistory(history) {
+    console.log('\n📜 === LỊCH SỬ DỰ ĐOÁN ===');
+    console.log('═══════════════════════════════════════════');
+    
+    if (!detailedStats.recentHistory || detailedStats.recentHistory.length === 0) {
+        console.log('❌ Chưa có lịch sử dự đoán nào');
+        console.log('💡 Hãy đợi chương trình dự đoán và xác minh kết quả');
+        return;
+    }
+
+    const total = detailedStats.recentHistory.length;
+    console.log(`📊 Tổng số dự đoán đã lưu: ${total}`);
+    console.log(`📈 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(2)}% (${stats.correct}/${stats.total})`);
+    console.log(`🏆 Chuỗi đúng tốt nhất: ${stats.best_streak}`);
+    console.log(`📉 Chuỗi sai tệ nhất: ${stats.worst_streak}`);
+    console.log(`📊 Chuỗi đúng hiện tại: ${stats.current_streak}`);
+    
+    console.log(`\n📋 20 DỰ ĐOÁN GẦN NHẤT:`);
+    console.log('   ┌──────────┬────────────┬────────────┬──────────────────┬──────────┬────────────┐');
+    console.log('   │ Phiên    │ Dự đoán    │ Thực tế    │ Loại cầu         │ Kết quả  │ Độ tin cậy │');
+    console.log('   ├──────────┼────────────┼────────────┼──────────────────┼──────────┼────────────┤');
+    
+    const recent = detailedStats.recentHistory.slice(-20).reverse();
+    for (const item of recent) {
+        const result = item.correct ? '✅ ĐÚNG' : '❌ SAI';
+        console.log(`   │ ${String(item.phien).padStart(8)} │ ${(item.prediction || '').padEnd(10)} │ ${(item.actual || '').padEnd(10)} │ ${(item.pattern || '').padEnd(16)} │ ${result.padEnd(8)} │ ${String(item.confidence || 0).padEnd(10)}% │`);
+    }
+    console.log('   └──────────┴────────────┴────────────┴──────────────────┴──────────┴────────────┘');
+    
+    console.log(`\n📊 THỐNG KÊ THEO LOẠI CẦU (Top 5):`);
+    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
+    console.log('   │ Loại cầu             │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
+    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
+    
+    const sortedPatterns = Object.entries(detailedStats.byPattern)
+        .filter(([_, data]) => data.total > 0)
+        .sort((a, b) => b[1].total - a[1].total)
+        .slice(0, 5);
+    
+    for (const [pattern, data] of sortedPatterns) {
+        const rate = (data.correct / data.total * 100).toFixed(1);
+        console.log(`   │ ${pattern.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
+    }
+    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
+    
+    console.log('\n═══════════════════════════════════════════\n');
+}
+
+// --- Xử lý lệnh từ console ---
+function setupCommandHandler() {
+    console.log('\n💡 Gõ /dudoan để xem dự đoán');
+    console.log('💡 Gõ /lichsu để xem lịch sử');
+    console.log('💡 Gõ /help để xem hướng dẫn');
+    console.log('💡 Gõ /thoat để thoát chương trình\n');
+
+    rl.on('line', (input) => {
+        const cmd = input.trim().toLowerCase();
+        
+        switch(cmd) {
+            case '/dudoan':
+            case '/du doan':
+                showPrediction(globalHistory);
+                break;
+                
+            case '/lichsu':
+            case '/lich su':
+                showHistory(globalHistory);
+                break;
+                
+            case '/help':
+            case '/h':
+                console.log('\n📖 === HƯỚNG DẪN SỬ DỤNG ===');
+                console.log('═══════════════════════════════════════════');
+                console.log('  /dudoan   - Xem dự đoán phiên tiếp theo');
+                console.log('  /lichsu   - Xem lịch sử dự đoán gần đây');
+                console.log('  /stats    - Xem thống kê chi tiết');
+                console.log('  /help     - Hiển thị hướng dẫn này');
+                console.log('  /thoat    - Thoát chương trình');
+                console.log('═══════════════════════════════════════════\n');
+                break;
+                
+            case '/stats':
+            case '/thongke':
+                printDetailedStats();
+                break;
+                
+            case '/thoat':
+            case '/exit':
+            case '/quit':
+                console.log('\n🛑 Đang dừng chương trình...');
+                saveStatsFile();
+                saveDetailedStats();
+                console.log('✅ Đã lưu thống kê!');
+                rl.close();
+                process.exit(0);
+                break;
+                
+            default:
+                if (cmd && !cmd.startsWith('/')) {
+                    console.log(`❌ Lệnh không hợp lệ: "${cmd}"`);
+                    console.log('💡 Gõ /help để xem danh sách lệnh');
+                }
+                break;
+        }
+    });
+}
+
+function printDetailedStats() {
+    console.log('\n📊 === THỐNG KÊ CHI TIẾT ===');
+    console.log('═══════════════════════════════════════════');
+    
+    console.log(`\n📈 TỔNG QUAN:`);
+    console.log(`   Tổng dự đoán: ${stats.total}`);
+    console.log(`   Đúng: ${stats.correct} (${stats.total > 0 ? (stats.correct/stats.total*100).toFixed(2) : 0}%)`);
+    console.log(`   Sai: ${stats.wrong} (${stats.total > 0 ? (stats.wrong/stats.total*100).toFixed(2) : 0}%)`);
+    console.log(`   Chuỗi đúng hiện tại: ${stats.current_streak}`);
+    console.log(`   Chuỗi đúng tốt nhất: ${stats.best_streak}`);
+    console.log(`   Chuỗi sai tệ nhất: ${stats.worst_streak}`);
+    
+    console.log(`\n📊 THỐNG KÊ THEO LOẠI CẦU:`);
+    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
+    console.log('   │ Loại cầu             │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
+    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
+    
+    const sortedPatterns = Object.entries(detailedStats.byPattern)
+        .filter(([_, data]) => data.total > 0)
+        .sort((a, b) => b[1].total - a[1].total);
+    
+    for (const [pattern, data] of sortedPatterns) {
+        const rate = (data.correct / data.total * 100).toFixed(1);
+        console.log(`   │ ${pattern.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
+    }
+    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
+    
+    console.log(`\n📊 THỐNG KÊ THEO ĐỘ TIN CẬY:`);
+    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
+    console.log('   │ Độ tin cậy          │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
+    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
+    
+    for (const [range, data] of Object.entries(detailedStats.byConfidence)) {
+        if (data.total > 0) {
+            const rate = (data.correct / data.total * 100).toFixed(1);
+            console.log(`   │ ${range.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
+        }
+    }
+    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
+    
+    console.log('\n═══════════════════════════════════════════\n');
+}
+
+function autoVerify(history) {
+    if (stats.last_prediction && history.length > 0) {
+        const lp = stats.last_prediction;
+        const latest = history[history.length - 1];
+        
+        if (latest.phien === lp.phien) {
+            const actual = latest.ket_qua || '';
+            if (actual) {
+                stats.total++;
+                const a = actual.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
+                const p = lp.prediction.toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI');
+                const ok = p === a;
+
+                if (ok) {
+                    stats.correct++;
+                    stats.current_streak++;
+                    if (stats.current_streak > stats.best_streak) {
+                        stats.best_streak = stats.current_streak;
+                    }
+                } else {
+                    stats.wrong++;
+                    stats.current_streak = 0;
+                    let wrongStreak = 0;
+                    for (let i = stats.history.length - 1; i >= 0; i--) {
+                        if (!stats.history[i].correct) wrongStreak++;
+                        else break;
+                    }
+                    if (wrongStreak > stats.worst_streak) {
+                        stats.worst_streak = wrongStreak;
+                    }
+                }
+
+                predictor.updateStatus(actual);
+                
+                const historyEntry = {
+                    phien: latest.phien,
+                    prediction: lp.prediction,
+                    actual: actual,
+                    confidence: lp.confidence,
+                    pattern: lp.pattern || 'Unknown',
+                    correct: ok,
+                    timestamp: vnNow()
+                };
+                
+                stats.history.push(historyEntry);
+                if (stats.history.length > 500) stats.history = stats.history.slice(-500);
+                
+                updateDetailedStats(
+                    lp.prediction,
+                    actual,
+                    lp.pattern || 'Unknown',
+                    lp.confidence,
+                    ok
+                );
+                
+                const acc = ((stats.correct / Math.max(stats.total, 1)) * 100).toFixed(1);
+                console.log(`🔍 VERIFY #${latest.phien}: ${ok ? '✅ ĐÚNG' : '❌ SAI'} | Tỷ lệ: ${acc}% (${stats.correct}/${stats.total}) | Streak: ${stats.current_streak}`);
+                
+                stats.last_prediction = null;
+                saveStatsFile();
+            }
+        }
+    }
+}
+
+function autoPredict(history) {
+    if (!stats.prediction_started) {
+        if (history.length >= MIN_DATA_FOR_PREDICTION) {
+            stats.prediction_started = true;
+            console.log(`\n🎉 ĐÃ ĐỦ ${MIN_DATA_FOR_PREDICTION} PHIÊN DỮ LIỆU! BẮT ĐẦU DỰ ĐOÁN...\n`);
+        } else {
+            const remaining = MIN_DATA_FOR_PREDICTION - history.length;
+            console.log(`⏳ Đang thu thập dữ liệu: ${history.length}/${MIN_DATA_FOR_PREDICTION} phiên. Cần thêm ${remaining} phiên nữa để bắt đầu dự đoán.`);
             return;
         }
-        const prev = this.history[this.history.length - 2];
-        if (prev === result) {
-            this.streak.length++;
-        } else {
-            this.streak = { type: result, length: 1 };
-        }
     }
-
-    updateMarkov(result) {
-        const last = this.history[this.history.length - 2];
-        if (!last) return;
-        if (!this.markov.has(last)) this.markov.set(last, { B: 0, P: 0, T: 0 });
-        this.markov.get(last)[result]++;
+    
+    if (stats.total_predictions_made >= MAX_PREDICTIONS) {
+        console.log(`🏁 Đã đạt giới hạn ${MAX_PREDICTIONS} dự đoán. Ngừng dự đoán mới.`);
+        return;
     }
-
-    analyzeAdvancedPatterns() {
-        this.patterns.clear();
-        const len = this.history.length;
-        if (len < 5) return;
-
-        // Dragon (bệt dài)
-        if (this.streak.length >= 4) this.patterns.set('DRAGON', this.streak.length);
-
-        // Chop (đan xen)
-        let chopCount = 0;
-        for (let i = 1; i < len; i++) {
-            if (this.history[i] !== this.history[i-1]) chopCount++;
-        }
-        if (chopCount / (len - 1) > 0.75) this.patterns.set('STRONG_CHOP', true);
-
-        // Tie cluster
-        const tieRatio = this.history.filter(r => r === 'T').length / len;
-        if (tieRatio > 0.12) this.patterns.set('TIE_CLUSTER', tieRatio);
-
-        // Double pattern
-        let doubleCount = 0;
-        for (let i = 1; i < len; i++) {
-            if (this.history[i] === this.history[i-1]) doubleCount++;
-        }
-        if (doubleCount / len > 0.35) this.patterns.set('DOUBLE_HEAVY', true);
-
-        // Pattern 2-2
-        if (len >= 4) {
-            const sub = this.history.slice(-4);
-            if (sub[0] === sub[2] && sub[1] === sub[3] && sub[0] !== sub[1]) {
-                this.patterns.set('PATTERN_22', true);
+    
+    if (history.length >= 5) {
+        try {
+            const r = predictor.predict(history);
+            const cur = history[history.length - 1];
+            let ph = cur.phien || 0;
+            if (typeof ph === 'string') {
+                const cleaned = ph.replace('#', '');
+                ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
             }
-        }
-    }
-
-    // Học từ kết quả thực tế (cập nhật trọng số)
-    learnFromResult(actual) {
-        if (this.history.length < 2) return;
-        // Lấy dự đoán trước đó (nếu có)
-        const last = this.history[this.history.length - 2];
-        // Không có lưu trực tiếp dự đoán, nhưng có thể dùng để điều chỉnh markov
-        // Ở đây ta sẽ cập nhật trọng số dựa trên độ chính xác của các chỉ báo
-        // Đơn giản: tăng trọng số của chỉ báo nào dự đoán đúng
-        // Phức tạp hơn: lưu feature vector và dùng logistic regression
-        // Ta sẽ thực hiện cập nhật đơn giản: nếu streak dự đoán đúng => tăng weight streak
-        // (chỉ là minh họa)
-        // Thực tế ta có thể lưu các đặc trưng và dùng thống kê
-        // Ở đây ta thực hiện điều chỉnh nhẹ dựa trên độ dài streak
-        if (this.streak.length >= 3) {
-            // Nếu streak đúng (tức là kết quả tiếp theo đúng với streak)
-            if (this.streak.type === actual) {
-                this.weights.streak *= (1 + this.options.learningRate);
-            } else {
-                this.weights.streak *= (1 - this.options.learningRate);
-            }
-        }
-        // Giới hạn trọng số
-        for (let key in this.weights) {
-            this.weights[key] = Math.max(0.3, Math.min(2.0, this.weights[key]));
-        }
-    }
-
-    // Lấy dự đoán Markov
-    getMarkovPrediction(last) {
-        if (!this.markov.has(last)) return null;
-        const counts = this.markov.get(last);
-        const total = Object.values(counts).reduce((a, b) => a + b, 0);
-        if (total === 0) return null;
-        let best = 'B';
-        let maxProb = 0;
-        for (const [k, v] of Object.entries(counts)) {
-            const prob = v / total;
-            if (prob > maxProb) {
-                maxProb = prob;
-                best = k;
-            }
-        }
-        return { prediction: best, confidence: maxProb };
-    }
-
-    // Dự đoán chính
-    predict() {
-        if (this.history.length === 0) {
-            return { prediction: 'B', confidence: 0.52, reason: "Default Banker", details: {} };
-        }
-
-        const last = this.history[this.history.length - 1];
-        let prediction = 'B';
-        let confidence = 0.5;
-        const reasons = [];
-        const details = {};
-
-        // 1. Phân tích streak
-        const streakInfo = this.streak.length >= 4 ? { decision: 'FOLLOW', conf: 0.82 } :
-                           (this.streak.length >= 3 ? { decision: 'FOLLOW', conf: 0.68 } :
-                           { decision: 'BREAK', conf: 0.75 });
-        if (streakInfo.decision === 'FOLLOW' && this.streak.type !== 'T') {
-            prediction = this.streak.type;
-            confidence = streakInfo.conf * this.weights.streak;
-            reasons.push(`Theo bệt ${this.streak.type}(${this.streak.length})`);
-        } else {
-            prediction = (last === 'B' ? 'P' : (last === 'P' ? 'B' : 'B'));
-            confidence = streakInfo.conf * this.weights.streak;
-            reasons.push(`Bẻ cầu ${last} → ${prediction}`);
-        }
-        details.streak = { prediction, confidence: confidence };
-
-        // 2. Markov Chain
-        const markovPred = this.getMarkovPrediction(last);
-        if (markovPred && markovPred.confidence > 0.55) {
-            const markovConf = markovPred.confidence * this.weights.markov;
-            // Kết hợp với dự đoán hiện tại (lấy trung bình có trọng số)
-            // Nếu dự đoán khác nhau, ưu tiên cái có confidence cao hơn
-            if (markovConf > confidence) {
-                prediction = markovPred.prediction;
-                confidence = markovConf;
-                reasons.push(`Markov Chain (${markovPred.prediction})`);
-            } else {
-                // vẫn giữ prediction cũ, nhưng cộng thêm confidence
-                confidence = Math.max(confidence, markovConf * 0.8);
-                reasons.push("Markov hỗ trợ");
-            }
-        }
-        details.markov = markovPred;
-
-        // 3. Phân tích đường (Road)
-        const roadAnalysis = this.road.analyze();
-        // Dự đoán dựa trên bigEye: nếu tỉ lệ O cao => khả năng đảo chiều
-        const bigEyeO = roadAnalysis.bigEye.O || 0.5;
-        if (bigEyeO > 0.6) {
-            const roadPred = (last === 'B' ? 'P' : (last === 'P' ? 'B' : 'B'));
-            const roadConf = bigEyeO * this.weights.road;
-            if (roadConf > confidence) {
-                prediction = roadPred;
-                confidence = roadConf;
-                reasons.push(`Big Eye đảo chiều (O=${bigEyeO.toFixed(2)})`);
-            } else {
-                confidence = Math.max(confidence, roadConf * 0.7);
-                reasons.push("Big Eye hỗ trợ");
-            }
-        }
-        details.road = roadAnalysis;
-
-        // 4. Pattern detection
-        if (this.patterns.get('STRONG_CHOP')) {
-            const chopPred = (last === 'B' ? 'P' : 'B');
-            const chopConf = 0.72 * this.weights.chop;
-            if (chopConf > confidence) {
-                prediction = chopPred;
-                confidence = chopConf;
-                reasons.push("Strong Chop");
-            }
-        }
-        if (this.patterns.get('PATTERN_22')) {
-            // Dự đoán theo block 1
-            const block1 = this.history[this.history.length - 2]; // ký tự thứ 2 từ cuối
-            const patternConf = 0.65 * this.weights.pattern;
-            if (patternConf > confidence) {
-                prediction = block1;
-                confidence = patternConf;
-                reasons.push("Pattern 2-2");
-            }
-        }
-
-        // 5. Tie cluster
-        if (this.patterns.get('TIE_CLUSTER') && Math.random() < this.options.tieBias * 2) {
-            if (Math.random() < 0.25) {
-                prediction = 'T';
-                confidence = Math.max(confidence, 0.55);
-                reasons.push("Tie activation");
-            }
-        }
-
-        // 6. Anti-detect variance
-        if (Math.random() < this.options.antiDetectVariance) {
-            const rand = ['B','P','T'][Math.floor(Math.random() * 3)];
-            // Chỉ thay đổi nếu confidence không quá cao (>0.8)
-            if (confidence < 0.8) {
-                prediction = rand;
-                confidence = Math.min(0.6, confidence + 0.05);
-                reasons.push("Anti-Detect");
-            }
-        }
-
-        // Điều chỉnh confidence dựa trên số lượng dữ liệu
-        confidence = Math.min(0.96, confidence * (1 + this.history.length * 0.0005));
-        confidence = parseFloat(confidence.toFixed(3));
-
-        return {
-            prediction,
-            confidence,
-            reason: reasons.join(" | "),
-            details,
-            streak: this.streak,
-            patterns: Array.from(this.patterns.keys()),
-            markovStats: Object.fromEntries(this.markov)
-        };
-    }
-
-    // Gợi ý cược Kelly
-    suggestBet(unit = 100) {
-        const pred = this.predict();
-        const kelly = Math.max(0.01, (pred.confidence * 2 - 1) * 0.6);
-        return {
-            betOn: pred.prediction,
-            amount: Math.round(unit * kelly),
-            confidence: pred.confidence
-        };
-    }
-
-    // Reset
-    reset() {
-        this.history = [];
-        this.streak = { type: null, length: 0 };
-        this.markov.clear();
-        this.patterns.clear();
-        this.road = new RoadAnalyzer();
-        // giữ nguyên weights
-        console.log("🔄 Reset OMEGA v3.0");
-    }
-}
-
-
-// ============================================================
-// PHẦN 3: TÍCH HỢP SERVER NODE.JS (GIỮ NGUYÊN CẤU TRÚC)
-// ============================================================
-const axios = require('axios');
-const express = require('express');
-const https = require('https');
-
-// Cấu hình tài khoản
-const USERNAME = "6tyghujkm";
-const PASSWORD = "6tyghujkm";
-
-const BASE = "https://aibcr.me";
-const LOGIN_URL = `${BASE}/login`;
-const LOBBY_URL = `${BASE}/ae/lobby`;
-const GET_RESULT_URL = `${BASE}/baccarat/getnewresult`;
-
-const agent = new https.Agent({ rejectUnauthorized: false });
-let cookieJar = '';
-let baccaratData = [];
-let lastUpdate = null;
-
-// Biến toàn cục cho OMEGA
-const omegaInstances = {};          // key: tableName, value: instance
-const processedResults = {};        // key: tableName, string đã xử lý
-const predictions = {};             // key: tableName, prediction object
-const historyLog = [];              // mảng log dự đoán
-
-// Session axios
-const session = axios.create({
-    baseURL: BASE,
-    timeout: 30000,
-    httpsAgent: agent,
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
-    }
-});
-
-session.interceptors.request.use(config => {
-    if (cookieJar) config.headers.Cookie = cookieJar;
-    return config;
-});
-
-session.interceptors.response.use(res => {
-    const setCookie = res.headers['set-cookie'];
-    if (setCookie) {
-        for (const cookie of setCookie) {
-            const [name, value] = cookie.split(';')[0].split('=');
-            const regex = new RegExp(`${name}=[^;]+;?`, 'g');
-            cookieJar = cookieJar.replace(regex, '');
-            cookieJar += `${name}=${value}; `;
-        }
-    }
-    return res;
-});
-
-// Hàm lấy CSRF token
-function getCsrfToken(html) {
-    let match = html.match(/<input[^>]*name="_token"[^>]*value="([^"]+)"/);
-    if (match) return match[1];
-    match = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/);
-    return match ? match[1] : null;
-}
-
-// Đăng nhập
-async function login() {
-    try {
-        console.log('[LOGIN] Đang lấy trang đăng nhập...');
-        const getResp = await session.get(LOGIN_URL);
-        const token = getCsrfToken(getResp.data);
-        if (!token) {
-            console.error('[LOGIN] Không tìm thấy CSRF token!');
-            return false;
-        }
-        console.log(`[LOGIN] CSRF token: ${token}`);
-
-        const formData = new URLSearchParams();
-        formData.append('username', USERNAME);
-        formData.append('password', PASSWORD);
-        formData.append('_token', token);
-        formData.append('action', 'Login');
-
-        const headers = {
-            'Referer': LOGIN_URL,
-            'Origin': BASE,
-            'Content-Type': 'application/x-www-form-urlencoded'
-        };
-
-        console.log('[LOGIN] Đang gửi request đăng nhập...');
-        const loginResp = await session.post(LOGIN_URL, formData.toString(), { headers });
-        if (loginResp.status === 200 || loginResp.status === 302) {
-            console.log('[LOGIN] Thành công!');
-            return true;
-        }
-        console.error(`[LOGIN] Thất bại, status: ${loginResp.status}`);
-        return false;
-    } catch (error) {
-        console.error('[LOGIN] Lỗi:', error.message);
-        return false;
-    }
-}
-
-// Vào lobby
-async function goToLobby() {
-    try {
-        console.log('[LOBBY] Đang vào lobby...');
-        await session.get(LOBBY_URL);
-        console.log('[LOBBY] OK');
-        return true;
-    } catch (error) {
-        console.error('[LOBBY] Lỗi:', error.message);
-        return false;
-    }
-}
-
-// Lấy dữ liệu baccarat
-async function fetchBaccaratData() {
-    try {
-        let xsrfToken = '';
-        const xsrfMatch = cookieJar.match(/XSRF-TOKEN=([^;]+)/);
-        if (xsrfMatch) xsrfToken = decodeURIComponent(xsrfMatch[1]);
-        
-        const headers = {
-            'Referer': LOBBY_URL,
-            'Origin': BASE,
-            'X-Requested-With': 'XMLHttpRequest',
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-        };
-        if (xsrfToken) headers['X-XSRF-TOKEN'] = xsrfToken;
-
-        const formData = new URLSearchParams();
-        formData.append('gameCode', 'ae');
-
-        const resp = await session.post(GET_RESULT_URL, formData.toString(), { headers });
-        
-        if (resp.data && resp.data.code === 200 && Array.isArray(resp.data.data)) {
-            baccaratData = resp.data.data.map(item => ({
-                table: item.table_name,
-                table_id: item.table_id,
-                result: item.result,
-                goodRoad: item.goodRoad || '',
-                cards: item.cards || '',
-                game_code: item.game_code
-            }));
-            lastUpdate = new Date().toISOString();
-            console.log(`[FETCH] Lấy thành công ${baccaratData.length} bàn lúc ${lastUpdate}`);
-        } else {
-            console.warn('[FETCH] Dữ liệu không đúng format:', resp.data);
-        }
-        return baccaratData;
-    } catch (error) {
-        console.error('[FETCH] Lỗi:', error.message);
-        return [];
-    }
-}
-
-// Cập nhật dự đoán với OMEGA v3.0
-function updatePredictionsWithOmega() {
-    for (const item of baccaratData) {
-        const table = item.table;
-        const resultStr = item.result || ''; // chuỗi "BPBPT..."
-
-        if (!omegaInstances[table]) {
-            omegaInstances[table] = new TskhangOmegaAnynisthis();
-            processedResults[table] = '';
-        }
-
-        const omega = omegaInstances[table];
-        const oldStr = processedResults[table] || '';
-        const newStr = resultStr;
-
-        if (newStr.length > oldStr.length) {
-            const newChars = newStr.slice(oldStr.length);
-            for (const ch of newChars) {
-                if (['B', 'P', 'T'].includes(ch)) {
-                    omega.addResult(ch);
-                }
-            }
-            processedResults[table] = newStr;
-
-            // Lấy dự đoán mới
-            const pred = omega.predict();
-            predictions[table] = {
-                table,
-                predicted_result: pred.prediction,
-                confidence: Math.round(pred.confidence * 100),
-                reason: pred.reason,
-                predicted_at: new Date().toISOString(),
-                session: newStr.length,
-                current_result: newStr,
-                streak: pred.streak,
-                patterns: pred.patterns,
-                details: pred.details,
-                markovStats: pred.markovStats
+            
+            const nextPhien = ph + 1;
+            stats.last_prediction = { 
+                phien: nextPhien, 
+                prediction: r.pred, 
+                confidence: r.conf,
+                pattern: r.type
             };
-
-            // Log dự đoán
-            historyLog.push({
-                table,
-                predicted_result: pred.prediction,
-                confidence: Math.round(pred.confidence * 100),
-                method: pred.reason,
-                predicted_at: predictions[table].predicted_at,
-                actual_result: null,
-                is_correct: null,
-                session: newStr.length,
-                details: pred.details
-            });
-        }
-    }
-
-    // Kiểm tra kết quả thực tế cho các dự đoán trước
-    for (const log of historyLog) {
-        if (log.actual_result === null) {
-            const table = log.table;
-            const currentStr = processedResults[table] || '';
-            if (currentStr.length > log.session) {
-                const actualChar = currentStr[log.session - 1];
-                if (actualChar) {
-                    log.actual_result = actualChar;
-                    log.is_correct = (actualChar === log.predicted_result);
-                    log.result_at = new Date().toISOString();
-                }
-            }
+            stats.total_predictions_made++;
+            
+            const remaining = MAX_PREDICTIONS - stats.total_predictions_made;
+            console.log(`🎯 DỰ ĐOÁN #${nextPhien}: ${r.pred} | Độ tin cậy: ${r.conf}% | ${r.type} | Còn: ${remaining}/${MAX_PREDICTIONS}`);
+            
+            saveStatsFile();
+        } catch (e) {
+            console.error(`Lỗi dự đoán: ${e.message}`);
         }
     }
 }
 
-// Vòng lặp tự động
-async function autoUpdate() {
-    while (true) {
-        await fetchBaccaratData();
-        updatePredictionsWithOmega();
-        await new Promise(resolve => setTimeout(resolve, 2000));
-    }
+function safeInt(v, d = 0) {
+    const parsed = parseInt(v);
+    return isNaN(parsed) ? d : parsed;
 }
 
-// ---------- SERVER EXPRESS ----------
-const app = express();
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', '*');
-    next();
-});
-
-app.get('/api/baccarat', (req, res) => {
-    res.json({
-        success: true,
-        data: baccaratData,
-        lastUpdate: lastUpdate,
-        total: baccaratData.length
-    });
-});
-
-app.get('/api/baccarat/:table', (req, res) => {
-    const tableName = req.params.table;
-    const found = baccaratData.find(item => item.table === tableName);
-    if (found) res.json({ success: true, data: found });
-    else res.json({ success: false, message: `Không tìm thấy bàn ${tableName}` });
-});
-
-app.get('/predict', (req, res) => {
-    const predArray = Object.values(predictions).map(p => ({ ...p }));
-    res.json({
-        success: true,
-        data: predArray,
-        total: predArray.length,
-        lastUpdate: lastUpdate,
-        omega_instances: Object.keys(omegaInstances).length
-    });
-});
-
-app.get('/ls', (req, res) => {
-    const tableFilter = req.query.table;
-    let filtered = historyLog;
-    if (tableFilter) filtered = historyLog.filter(h => h.table === tableFilter);
-    const withResult = filtered.filter(h => h.actual_result !== null);
-    withResult.sort((a, b) => new Date(b.result_at) - new Date(a.result_at));
-    const limited = withResult.slice(0, 200);
-    const total = limited.length;
-    const correct = limited.filter(h => h.is_correct === true).length;
-    const wrong = limited.filter(h => h.is_correct === false).length;
-    const winRate = total > 0 ? ((correct / total) * 100).toFixed(1) : '0.0';
-
-    res.json({
-        success: true,
-        data: limited,
-        stats: { total, correct, wrong, winRate: winRate + '%' }
-    });
-});
-
-// Giao diện web đẹp
-app.get('/api/check', (req, res) => {
-    const html = `
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Baccarat Omega v3.0</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .table-dark-custom { background: #161b22; border-collapse: separate; border-spacing: 0; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
-        .table-dark-custom th { background: #21262d; color: #58a6ff; border-bottom: 2px solid #30363d; }
-        .table-dark-custom td { border-bottom: 1px solid #21262d; vertical-align: middle; }
-        .prediction-P { color: #3fb950; font-weight: bold; }
-        .prediction-B { color: #f85149; font-weight: bold; }
-        .prediction-T { color: #d29922; font-weight: bold; }
-        .fade-in { animation: fadeIn 0.5s; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
-        .badge-omega { background: #6e40c9; color: white; }
-        .streak-badge { background: #1f6feb; }
-        .small-text { font-size: 0.8rem; }
-    </style>
-</head>
-<body>
-    <div class="container py-4">
-        <h2 class="mb-3">🎰 Baccarat Prediction <span class="text-warning">Omega v3.0</span></h2>
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <span>Cập nhật 2s | Omega instances: <span id="omegaCount">0</span></span>
-            <span class="badge bg-success" id="statusBadge">Live</span>
-        </div>
-        <div class="table-responsive">
-            <table class="table table-dark-custom table-hover">
-                <thead>
-                    <tr>
-                        <th>Bàn</th>
-                        <th>Kết quả hiện tại</th>
-                        <th>Dự đoán</th>
-                        <th>Độ tin cậy</th>
-                        <th>Phương pháp</th>
-                        <th>Streak</th>
-                        <th>Phiên</th>
-                    </tr>
-                </thead>
-                <tbody id="predictionBody">
-                    <tr><td colspan="7" class="text-center text-muted">Đang tải dữ liệu...</td></tr>
-                </tbody>
-            </table>
-        </div>
-        <div class="mt-3">
-            <a href="/ls" class="btn btn-outline-info btn-sm">Xem lịch sử</a>
-            <a href="/predict" class="btn btn-outline-secondary btn-sm">JSON</a>
-        </div>
-    </div>
-    <script>
-        async function fetchPredictions() {
-            try {
-                const res = await fetch('/predict');
-                const json = await res.json();
-                if (json.success) {
-                    renderTable(json.data);
-                    document.getElementById('omegaCount').textContent = json.omega_instances || 0;
-                    document.getElementById('statusBadge').textContent = 'Live';
-                    document.getElementById('statusBadge').className = 'badge bg-success';
-                }
-            } catch (err) {
-                console.error(err);
-                document.getElementById('statusBadge').textContent = 'Lỗi';
-                document.getElementById('statusBadge').className = 'badge bg-danger';
-            }
-        }
-
-        function renderTable(data) {
-            const tbody = document.getElementById('predictionBody');
-            if (!data.length) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Không có dữ liệu</td></tr>';
-                return;
-            }
-            tbody.innerHTML = data.map(item => {
-                const predClass = item.predicted_result === 'P' ? 'prediction-P' : (item.predicted_result === 'B' ? 'prediction-B' : 'prediction-T');
-                const confColor = item.confidence > 70 ? 'bg-success' : (item.confidence > 55 ? 'bg-warning text-dark' : 'bg-secondary');
-                const streakText = item.streak ? \`\${item.streak.type}(\${item.streak.length})\` : 'N/A';
-                return \`
-                <tr class="fade-in">
-                    <td><strong>\${item.table}</strong></td>
-                    <td><code>\${item.current_result?.slice(-12) || '---'}</code></td>
-                    <td><span class="\${predClass}">\${item.predicted_result}</span></td>
-                    <td><span class="badge \${confColor}">\${item.confidence}%</span></td>
-                    <td><small>\${item.reason || item.method}</small></td>
-                    <td><span class="badge streak-badge">\${streakText}</span></td>
-                    <td><strong>#\${item.session}</strong></td>
-                </tr>\`;
-            }).join('');
-        }
-
-        fetchPredictions();
-        setInterval(fetchPredictions, 2000);
-    </script>
-</body>
-</html>`;
-    res.send(html);
-});
-
-// Khởi động
-async function start() {
-    console.log('========================================');
-    console.log('BACCARAT OMEGA v3.0 VIP PREDICTION');
-    console.log(`Tài khoản: ${USERNAME}`);
-    console.log('========================================');
-
-    console.log('[1] Đăng nhập...');
-    const loginOk = await login();
-    if (!loginOk) {
-        console.error('[ERROR] Đăng nhập thất bại!');
-        process.exit(1);
-    }
-
-    console.log('[2] Vào lobby...');
-    await goToLobby();
-
-    console.log('[3] Lấy dữ liệu lần đầu...');
-    await fetchBaccaratData();
-    if (baccaratData.length === 0) {
-        console.warn('[CẢNH BÁO] Không lấy được bàn nào.');
-    } else {
-        updatePredictionsWithOmega();
-        baccaratData.forEach(item => {
-            const pred = predictions[item.table];
-            if (pred) {
-                console.log(`   ${item.table.padEnd(5)} : Dự đoán ${pred.predicted_result} (${pred.confidence}%) - ${pred.reason} [Phiên #${pred.session}]`);
+// Hàm kiểm tra kết nối (sử dụng API_URL hiện tại)
+async function testLocalhost() {
+    try {
+        console.log(`🔍 Đang kiểm tra kết nối đến ${API_URL}...`);
+        const response = await axios.get(API_URL, { 
+            timeout: 5000,
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0'
             }
         });
+        console.log(`✅ Kết nối thành công! Status: ${response.status}`);
+        return true;
+    } catch (e) {
+        console.log(`❌ Không thể kết nối đến ${API_URL}`);
+        console.log(`   Lỗi: ${e.message}`);
+        if (e.code === 'ECONNREFUSED') {
+            console.log(`   💡 Hãy đảm bảo server localhost đang chạy`);
+            console.log(`   💡 Kiểm tra cổng: ${API_URL.split(':')[2]?.split('/')[0] || '3000'}`);
+        }
+        console.log(`\n   🔧 Cách khắc phục:`);
+        console.log(`   1. Kiểm tra server có đang chạy không`);
+        console.log(`   2. Kiểm tra URL API: ${API_URL}`);
+        console.log(`   3. Thử thay đổi URL trong file sunphhuy.js`);
+        console.log(`   4. Thử dùng: http://127.0.0.1:3000/api/tx`);
+        console.log(`   5. Hoặc dùng API bên ngoài thay vì localhost`);
+        console.log(`\n   💡 Để thay đổi URL, sửa dòng: const API_URL = "http://localhost:3000/api/tx";`);
+        return false;
     }
-
-    autoUpdate();
-
-    const PORT = 5000;
-    app.listen(PORT, '0.0.0.0', () => {
-        console.log(`\n🚀 SERVER ĐANG CHẠY:`);
-        console.log(`   Dự đoán JSON : http://localhost:${PORT}/predict`);
-        console.log(`   Giao diện    : http://localhost:${PORT}/api/check`);
-        console.log(`   Lịch sử      : http://localhost:${PORT}/ls`);
-        console.log(`   Lịch sử bàn  : http://localhost:${PORT}/ls?table=1`);
-        console.log(`   Data gốc     : http://localhost:${PORT}/api/baccarat`);
-        console.log(`\n🧠 OMEGA v3.0 SIÊU THUẬT TOÁN + AI TỰ HỌC ĐANG CHẠY...`);
-    });
 }
 
-start();
+// --- Main Collector ---
+async function collect() {
+    // Tự động lấy URL API
+    API_URL = await getAutoURL();
+    
+    console.log("🚀 SUNWIN TX COLLECTOR VIP - KHỞI ĐỘNG");
+    console.log("═══════════════════════════════════════════");
+    console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION.toLocaleString()} phiên`);
+    console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
+    console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
+    console.log(`🔗 API: ${API_URL}`);
+    console.log(`⏱️  Chu kỳ ping: ${CHECK_INTERVAL/1000} giây`);
+    console.log("═══════════════════════════════════════════\n");
+    
+    // Kiểm tra kết nối
+    const isConnected = await testLocalhost();
+    if (!isConnected) {
+        console.log(`\n⚠️ Vẫn tiếp tục chạy nhưng có thể không lấy được dữ liệu`);
+        console.log(`💡 Bạn có thể thay đổi URL API trong code nếu cần\n`);
+    }
+    
+    // Tải dữ liệu hiện có
+    let history = loadHistory();
+    globalHistory = history;
+    console.log(`📚 Đã tải ${history.length.toLocaleString()} phiên dữ liệu hiện có`);
+    
+    // Tải thống kê chi tiết
+    detailedStats = loadDetailedStats();
+    
+    // Khôi phục stats
+    try {
+        if (fs.existsSync(STATS_FILE)) {
+            const savedStats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf-8'));
+            stats = { ...stats, ...savedStats };
+            if (stats.prediction_started) {
+                console.log(`📈 Đã dự đoán ${stats.total_predictions_made.toLocaleString()}/${MAX_PREDICTIONS.toLocaleString()} phiên`);
+                console.log(`📊 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(1)}% (${stats.correct}/${stats.total})`);
+                console.log(`📈 Chuỗi đúng hiện tại: ${stats.current_streak}`);
+                console.log(`🏆 Chuỗi đúng tốt nhất: ${stats.best_streak}\n`);
+            }
+        }
+    } catch (e) {}
+    
+    // Setup command handler
+    setupCommandHandler();
+    
+    // Vòng lặp chính
+    let apiCallCount = 0;
+    let errorCount = 0;
+    
+    while (true) {
+        try {
+            apiCallCount++;
+            console.log(`\n🔄 Lần gọi API #${apiCallCount}...`);
+            
+            const response = await axios.get(API_URL, { 
+                timeout: 15000,
+                headers: {
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0'
+                }
+            });
+            
+            if (response.status === 200) {
+                errorCount = 0;
+                
+                let apiData = [];
+                if (Array.isArray(response.data)) {
+                    apiData = response.data;
+                } else if (Array.isArray(response.data?.data)) {
+                    apiData = response.data.data;
+                } else if (Array.isArray(response.data?.history)) {
+                    apiData = response.data.history;
+                } else if (Array.isArray(response.data?.result)) {
+                    apiData = response.data.result;
+                } else if (response.data && typeof response.data === "object" && response.data.phien) {
+                    apiData = [response.data];
+                }
+                
+                console.log(`📥 Nhận được ${apiData.length} phiên từ API`);
+                
+                if (apiData.length > 0) {
+                    let existing = new Set(history.map(h => h.phien));
+                    let newSessions = [];
+
+                    for (const item of apiData) {
+                        const ph = safeInt(item.phien || item.Phien || item.id);
+                        if (ph <= 0 || existing.has(ph)) continue;
+
+                        const newItem = {
+                            phien: ph,
+                            ket_qua: String(item.ket_qua || item.Ket_qua || ""),
+                            tong: safeInt(item.tong || item.Tong),
+                            xuc_xac_1: safeInt(item.xuc_xac_1 || item.Xuc_xac_1),
+                            xuc_xac_2: safeInt(item.xuc_xac_2 || item.Xuc_xac_2),
+                            xuc_xac_3: safeInt(item.xuc_xac_3 || item.Xuc_xac_3)
+                        };
+                        
+                        history.push(newItem);
+                        existing.add(ph);
+                        newSessions.push(newItem);
+                    }
+
+                    if (newSessions.length > 0) {
+                        history.sort((a, b) => a.phien - b.phien);
+                        globalHistory = history;
+                        
+                        if (history.length > MAX_STORAGE) {
+                            history = history.slice(-MAX_STORAGE);
+                            globalHistory = history;
+                        }
+                        
+                        saveHistory(history);
+                        
+                        const latest = history[history.length - 1];
+                        const progress = `${history.length.toLocaleString()}/${MIN_DATA_FOR_PREDICTION.toLocaleString()}`;
+                        console.log(`🎲 KQ #${latest.phien}: ${latest.ket_qua} | [${latest.xuc_xac_1},${latest.xuc_xac_2},${latest.xuc_xac_3}] = ${latest.tong} | Tiến độ: ${progress}`);
+                        
+                        autoVerify(history);
+                        autoPredict(history);
+                        
+                        if (stats.prediction_started && stats.total_predictions_made >= MAX_PREDICTIONS) {
+                            console.log("\n🎯 ĐÃ ĐẠT GIỚI HẠN DỰ ĐOÁN!");
+                            printDetailedStats();
+                            console.log("\n🛑 Kết thúc chương trình...");
+                            rl.close();
+                            process.exit(0);
+                        }
+                    } else {
+                        console.log(`ℹ️ Không có phiên mới. Đã có ${history.length} phiên.`);
+                    }
+                }
+            } else {
+                console.log(`⚠️ API trả về status: ${response.status}`);
+                errorCount++;
+            }
+        } catch (e) {
+            errorCount++;
+            console.error(`❌ Lỗi kết nối API (lần ${errorCount}): ${e.message}`);
+            if (e.response) {
+                console.error(`   Status: ${e.response.status}`);
+            }
+            if (e.code === 'ECONNREFUSED') {
+                console.error(`   💡 Server localhost chưa chạy hoặc cổng sai`);
+                console.error(`   💡 Kiểm tra: ${API_URL}`);
+                console.error(`   💡 Thử chạy server trước hoặc dùng API khác`);
+            }
+            if (e.code === 'ENOTFOUND') {
+                console.error(`   💡 Không tìm thấy host. Kiểm tra URL: ${API_URL}`);
+            }
+        }
+        
+        let waitTime = CHECK_INTERVAL;
+        if (errorCount > 5) {
+            waitTime = CHECK_INTERVAL * 3;
+            console.log(`⚠️ Nhiều lỗi xảy ra, tăng thời gian chờ lên ${waitTime/1000} giây`);
+        }
+        
+        console.log(`⏳ Chờ ${waitTime/1000} giây...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+}
+
+// Xử lý tắt chương trình
+process.on('SIGINT', () => {
+    console.log("\n🛑 Đang dừng chương trình...");
+    printDetailedStats();
+    saveStatsFile();
+    saveDetailedStats();
+    console.log("✅ Đã lưu thống kê!");
+    rl.close();
+    process.exit();
+});
+
+process.on('SIGTERM', () => {
+    console.log("\n🛑 Đang dừng chương trình...");
+    saveStatsFile();
+    saveDetailedStats();
+    console.log("✅ Đã lưu thống kê!");
+    rl.close();
+    process.exit();
+});
+
+process.on('unhandledRejection', (error) => {
+    console.error('❌ Unhandled Rejection:', error);
+});
+
+// Chạy Collector
+collect().catch(console.error);
