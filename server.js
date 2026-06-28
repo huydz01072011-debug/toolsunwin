@@ -2,38 +2,33 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const express = require('express');
 
-// --- Cấu hình & Khởi tạo ---
-// Hỗ trợ cả localhost và API bên ngoài
-const API_URL = process.env.API_URL || "https://various-collaborative-heights-sue.trycloudflare.com/api/tx"; // Mặc định localhost
-// Hoặc dùng: const API_URL = "http://127.0.0.1:3000/api/tx";
+// ========================= CẤU HÌNH =========================
+const API_URL = process.env.API_URL || "https://various-collaborative-heights-sue.trycloudflare.com/api/tx";
+const PORT = process.env.PORT || 3000;
+const DATA_FILE = process.env.DATA_FILE || "collected_data/sunwin_tx.json";
+const STATS_FILE = process.env.STATS_FILE || "database/stats.json";
+const DETAILED_STATS_FILE = process.env.DETAILED_STATS_FILE || "database/detailed_stats.json";
 
-const DATA_FILE = "collected_data/sunwin_tx.json";
-const STATS_FILE = "database/stats.json";
-const DETAILED_STATS_FILE = "database/detailed_stats.json";
+const MIN_DATA_FOR_PREDICTION = parseInt(process.env.MIN_DATA) || 10;
+const MAX_PREDICTIONS = parseInt(process.env.MAX_PREDICTIONS) || 100000;
+const MAX_STORAGE = parseInt(process.env.MAX_STORAGE) || 1000000;
+const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 5000;
+const SELF_PING_INTERVAL = 60000; // 1 phút
 
-// Các giới hạn
-const MIN_DATA_FOR_PREDICTION = 10;
-const MAX_PREDICTIONS = 100000;
-const MAX_STORAGE = 1000000;
-const CHECK_INTERVAL = 5000;
-
+// ========================= TIỆN ÍCH =========================
 const vnNow = () => {
     const d = new Date();
     return new Date(d.getTime() + (7 * 60 * 60 * 1000)).toISOString();
 };
 
-// Tạo interface cho readline
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true
-});
+function safeInt(v, d = 0) {
+    const parsed = parseInt(v);
+    return isNaN(parsed) ? d : parsed;
+}
 
-// Biến toàn cục để lưu history
-let globalHistory = [];
-
-// Thống kê chi tiết
+// ========================= THỐNG KÊ =========================
 let detailedStats = {
     byPattern: {
         'Đu Bệt': { total: 0, correct: 0, wrong: 0 },
@@ -89,6 +84,7 @@ let stats = {
     worst_streak: 0
 };
 
+// ========================= BỘ DỰ ĐOÁN =========================
 class TX_LogicPen_V4 {
     constructor() {
         this.error_streak = 0;
@@ -240,7 +236,7 @@ class TX_LogicPen_V4 {
 
 const predictor = new TX_LogicPen_V4();
 
-// --- Helper Functions ---
+// ========================= HÀM LƯU TRỮ =========================
 function loadHistory() {
     try {
         if (fs.existsSync(DATA_FILE)) {
@@ -359,7 +355,14 @@ function updateDetailedStats(prediction, actual, pattern, confidence, correct) {
     saveDetailedStats();
 }
 
-// --- LỆNH /dudoan ---
+// ========================= LỆNH TỪ CONSOLE =========================
+let globalHistory = [];
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
+});
+
 function showPrediction(history) {
     console.log('\n🎯 === DỰ ĐOÁN TIẾP THEO ===');
     console.log('═══════════════════════════════════════════');
@@ -405,7 +408,6 @@ function showPrediction(history) {
     }
 }
 
-// --- LỆNH /lichsu ---
 function showHistory(history) {
     console.log('\n📜 === LỊCH SỬ DỰ ĐOÁN ===');
     console.log('═══════════════════════════════════════════');
@@ -454,7 +456,49 @@ function showHistory(history) {
     console.log('\n═══════════════════════════════════════════\n');
 }
 
-// --- Xử lý lệnh từ console ---
+function printDetailedStats() {
+    console.log('\n📊 === THỐNG KÊ CHI TIẾT ===');
+    console.log('═══════════════════════════════════════════');
+    
+    console.log(`\n📈 TỔNG QUAN:`);
+    console.log(`   Tổng dự đoán: ${stats.total}`);
+    console.log(`   Đúng: ${stats.correct} (${stats.total > 0 ? (stats.correct/stats.total*100).toFixed(2) : 0}%)`);
+    console.log(`   Sai: ${stats.wrong} (${stats.total > 0 ? (stats.wrong/stats.total*100).toFixed(2) : 0}%)`);
+    console.log(`   Chuỗi đúng hiện tại: ${stats.current_streak}`);
+    console.log(`   Chuỗi đúng tốt nhất: ${stats.best_streak}`);
+    console.log(`   Chuỗi sai tệ nhất: ${stats.worst_streak}`);
+    
+    console.log(`\n📊 THỐNG KÊ THEO LOẠI CẦU:`);
+    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
+    console.log('   │ Loại cầu             │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
+    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
+    
+    const sortedPatterns = Object.entries(detailedStats.byPattern)
+        .filter(([_, data]) => data.total > 0)
+        .sort((a, b) => b[1].total - a[1].total);
+    
+    for (const [pattern, data] of sortedPatterns) {
+        const rate = (data.correct / data.total * 100).toFixed(1);
+        console.log(`   │ ${pattern.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
+    }
+    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
+    
+    console.log(`\n📊 THỐNG KÊ THEO ĐỘ TIN CẬY:`);
+    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
+    console.log('   │ Độ tin cậy          │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
+    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
+    
+    for (const [range, data] of Object.entries(detailedStats.byConfidence)) {
+        if (data.total > 0) {
+            const rate = (data.correct / data.total * 100).toFixed(1);
+            console.log(`   │ ${range.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
+        }
+    }
+    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
+    
+    console.log('\n═══════════════════════════════════════════\n');
+}
+
 function setupCommandHandler() {
     console.log('\n💡 Gõ /dudoan để xem dự đoán');
     console.log('💡 Gõ /lichsu để xem lịch sử');
@@ -513,49 +557,7 @@ function setupCommandHandler() {
     });
 }
 
-function printDetailedStats() {
-    console.log('\n📊 === THỐNG KÊ CHI TIẾT ===');
-    console.log('═══════════════════════════════════════════');
-    
-    console.log(`\n📈 TỔNG QUAN:`);
-    console.log(`   Tổng dự đoán: ${stats.total}`);
-    console.log(`   Đúng: ${stats.correct} (${stats.total > 0 ? (stats.correct/stats.total*100).toFixed(2) : 0}%)`);
-    console.log(`   Sai: ${stats.wrong} (${stats.total > 0 ? (stats.wrong/stats.total*100).toFixed(2) : 0}%)`);
-    console.log(`   Chuỗi đúng hiện tại: ${stats.current_streak}`);
-    console.log(`   Chuỗi đúng tốt nhất: ${stats.best_streak}`);
-    console.log(`   Chuỗi sai tệ nhất: ${stats.worst_streak}`);
-    
-    console.log(`\n📊 THỐNG KÊ THEO LOẠI CẦU:`);
-    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
-    console.log('   │ Loại cầu             │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
-    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
-    
-    const sortedPatterns = Object.entries(detailedStats.byPattern)
-        .filter(([_, data]) => data.total > 0)
-        .sort((a, b) => b[1].total - a[1].total);
-    
-    for (const [pattern, data] of sortedPatterns) {
-        const rate = (data.correct / data.total * 100).toFixed(1);
-        console.log(`   │ ${pattern.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
-    }
-    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
-    
-    console.log(`\n📊 THỐNG KÊ THEO ĐỘ TIN CẬY:`);
-    console.log('   ┌─────────────────────┬──────────┬──────────┬──────────┬──────────┐');
-    console.log('   │ Độ tin cậy          │ Tổng     │ Đúng     │ Sai      │ Tỷ lệ %  │');
-    console.log('   ├─────────────────────┼──────────┼──────────┼──────────┼──────────┤');
-    
-    for (const [range, data] of Object.entries(detailedStats.byConfidence)) {
-        if (data.total > 0) {
-            const rate = (data.correct / data.total * 100).toFixed(1);
-            console.log(`   │ ${range.padEnd(19)} │ ${String(data.total).padStart(8)} │ ${String(data.correct).padStart(8)} │ ${String(data.wrong).padStart(8)} │ ${rate.padStart(8)} │`);
-        }
-    }
-    console.log('   └─────────────────────┴──────────┴──────────┴──────────┴──────────┘');
-    
-    console.log('\n═══════════════════════════════════════════\n');
-}
-
+// ========================= XỬ LÝ DỰ ĐOÁN =========================
 function autoVerify(history) {
     if (stats.last_prediction && history.length > 0) {
         const lp = stats.last_prediction;
@@ -667,68 +669,182 @@ function autoPredict(history) {
     }
 }
 
-function safeInt(v, d = 0) {
-    const parsed = parseInt(v);
-    return isNaN(parsed) ? d : parsed;
-}
+// ========================= WEB SERVER (Express) =========================
+function startWebServer() {
+    const app = express();
 
-// Hàm kiểm tra kết nối localhost
-async function testLocalhost() {
-    try {
-        console.log(`🔍 Đang kiểm tra kết nối đến ${API_URL}...`);
-        const response = await axios.get(API_URL, { 
-            timeout: 5000,
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
-            }
+    // Route gốc hướng dẫn
+    app.get('/', (req, res) => {
+        res.send(`
+            <h1>🚀 SUNWIN TX Collector</h1>
+            <p>Chào mừng đến với API dự đoán Tài Xỉu.</p>
+            <ul>
+                <li><a href="/health">/health</a> - Kiểm tra sức khỏe</li>
+                <li><a href="/dudoan">/dudoan</a> - Dự đoán phiên tiếp theo (JSON)</li>
+                <li><a href="/stats">/stats</a> - Thống kê chi tiết (JSON)</li>
+                <li><a href="/check">/check</a> - Xem lịch sử dự đoán (giao diện)</li>
+            </ul>
+            <p><small>Phiên bản V4 với tự động ping mỗi 1 phút.</small></p>
+        `);
+    });
+
+    // Health check
+    app.get('/health', (req, res) => {
+        res.json({
+            status: 'OK',
+            total_sessions: globalHistory.length,
+            predictions_made: stats.total_predictions_made,
+            accuracy: stats.total > 0 ? (stats.correct / stats.total * 100).toFixed(2) : 0,
+            uptime: process.uptime(),
+            timestamp: vnNow()
         });
-        console.log(`✅ Kết nối thành công! Status: ${response.status}`);
-        return true;
-    } catch (e) {
-        console.log(`❌ Không thể kết nối đến ${API_URL}`);
-        console.log(`   Lỗi: ${e.message}`);
-        if (e.code === 'ECONNREFUSED') {
-            console.log(`   💡 Hãy đảm bảo server localhost đang chạy`);
-            console.log(`   💡 Kiểm tra cổng: ${API_URL.split(':')[2]?.split('/')[0] || '3000'}`);
+    });
+
+    // Dự đoán JSON
+    app.get('/dudoan', (req, res) => {
+        if (!globalHistory || globalHistory.length < 5) {
+            return res.json({ error: 'Chưa đủ dữ liệu (cần ít nhất 5 phiên)' });
         }
-        console.log(`\n   🔧 Cách khắc phục:`);
-        console.log(`   1. Kiểm tra server có đang chạy không`);
-        console.log(`   2. Kiểm tra URL API: ${API_URL}`);
-        console.log(`   3. Thử thay đổi URL trong file sunphhuy.js`);
-        console.log(`   4. Thử dùng: http://127.0.0.1:3000/api/tx`);
-        console.log(`   5. Hoặc dùng API bên ngoài thay vì localhost`);
-        console.log(`\n   💡 Để thay đổi URL, sửa dòng: const API_URL = "http://localhost:3000/api/tx";`);
-        return false;
-    }
+        try {
+            const r = predictor.predict(globalHistory);
+            const cur = globalHistory[globalHistory.length - 1];
+            let ph = cur.phien || 0;
+            if (typeof ph === 'string') {
+                const cleaned = ph.replace('#', '');
+                ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
+            }
+            const nextPhien = ph + 1;
+            res.json({
+                phien: nextPhien,
+                prediction: r.pred,
+                confidence: r.conf,
+                type: r.type,
+                reason: r.reason,
+                based_on: globalHistory.length
+            });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Thống kê JSON
+    app.get('/stats', (req, res) => {
+        res.json({
+            summary: detailedStats.summary,
+            byPattern: detailedStats.byPattern,
+            byConfidence: detailedStats.byConfidence,
+            byPrediction: detailedStats.byPrediction,
+            recent: detailedStats.recentHistory.slice(-50)
+        });
+    });
+
+    // Giao diện kiểm tra lịch sử dự đoán
+    app.get('/check', (req, res) => {
+        const history = detailedStats.recentHistory.slice(-100).reverse(); // 100 gần nhất
+        let rows = '';
+        for (const item of history) {
+            const color = item.correct ? '#d4edda' : '#f8d7da';
+            const statusText = item.correct ? '✅ Đúng' : '❌ Sai';
+            rows += `<tr style="background-color:${color};">
+                <td>${item.phien}</td>
+                <td>${item.prediction}</td>
+                <td>${item.actual}</td>
+                <td>${item.pattern}</td>
+                <td>${item.confidence}%</td>
+                <td>${statusText}</td>
+                <td>${new Date(item.timestamp).toLocaleString('vi-VN')}</td>
+            </tr>`;
+        }
+
+        const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Kiểm tra dự đoán Tài Xỉu</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f4; }
+                h1 { color: #333; }
+                .summary { background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                th { background: #007bff; color: white; padding: 10px; text-align: left; }
+                td { padding: 8px; border-bottom: 1px solid #ddd; }
+                tr:hover { background: #f1f1f1; }
+                .refresh { margin-top: 20px; }
+                .refresh a { background: #28a745; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; }
+                .refresh a:hover { background: #218838; }
+                .stats-box { display: flex; gap: 20px; flex-wrap: wrap; }
+                .stats-box div { background: #fff; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                .stats-box .correct { color: green; font-weight: bold; }
+                .stats-box .wrong { color: red; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <h1>📊 Lịch sử dự đoán (100 gần nhất)</h1>
+            <div class="summary">
+                <div class="stats-box">
+                    <div>Tổng dự đoán: <strong>${stats.total}</strong></div>
+                    <div>Đúng: <span class="correct">${stats.correct}</span></div>
+                    <div>Sai: <span class="wrong">${stats.wrong}</span></div>
+                    <div>Tỷ lệ đúng: <strong>${stats.total > 0 ? (stats.correct / stats.total * 100).toFixed(2) : 0}%</strong></div>
+                    <div>Chuỗi đúng hiện tại: <strong>${stats.current_streak}</strong></div>
+                    <div>Chuỗi đúng tốt nhất: <strong>${stats.best_streak}</strong></div>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Phiên</th>
+                        <th>Dự đoán</th>
+                        <th>Thực tế</th>
+                        <th>Loại cầu</th>
+                        <th>Độ tin cậy</th>
+                        <th>Kết quả</th>
+                        <th>Thời gian</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows || '<tr><td colspan="7">Chưa có dữ liệu dự đoán</td></tr>'}
+                </tbody>
+            </table>
+            <div class="refresh">
+                <a href="/check">🔄 Làm mới</a>
+            </div>
+            <p><a href="/">← Về trang chủ</a></p>
+        </body>
+        </html>
+        `;
+        res.send(html);
+    });
+
+    // Tự ping chính nó mỗi 1 phút (gọi /health nội bộ)
+    setInterval(() => {
+        const url = `http://localhost:${PORT}/health`;
+        axios.get(url).catch(err => {
+            // chỉ log lỗi nếu cần, không ảnh hưởng
+        });
+        console.log(`⏱️ Self-ping tại ${vnNow()}`);
+    }, SELF_PING_INTERVAL);
+
+    app.listen(PORT, () => {
+        console.log(`🌐 Web server đang chạy trên cổng ${PORT}`);
+        console.log(`   - Trang chủ: http://localhost:${PORT}/`);
+        console.log(`   - Health: http://localhost:${PORT}/health`);
+        console.log(`   - Dự đoán: http://localhost:${PORT}/dudoan`);
+        console.log(`   - Thống kê: http://localhost:${PORT}/stats`);
+        console.log(`   - Kiểm tra: http://localhost:${PORT}/check`);
+    });
 }
 
-// --- Main Collector ---
-async function collect() {
-    console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
-    console.log("═══════════════════════════════════════════");
-    console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION.toLocaleString()} phiên`);
-    console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
-    console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
-    console.log(`🔗 API: ${API_URL}`);
-    console.log("═══════════════════════════════════════════\n");
-    
-    // Kiểm tra kết nối localhost
-    const isConnected = await testLocalhost();
-    if (!isConnected) {
-        console.log(`\n⚠️ Vẫn tiếp tục chạy nhưng có thể không lấy được dữ liệu`);
-        console.log(`💡 Bạn có thể thay đổi URL API trong code nếu cần\n`);
-    }
-    
-    // Tải dữ liệu hiện có
+// ========================= VÒNG LẶP COLLECTOR =========================
+async function collectorLoop() {
     let history = loadHistory();
     globalHistory = history;
     console.log(`📚 Đã tải ${history.length.toLocaleString()} phiên dữ liệu hiện có`);
     
-    // Tải thống kê chi tiết
     detailedStats = loadDetailedStats();
     
-    // Khôi phục stats
     try {
         if (fs.existsSync(STATS_FILE)) {
             const savedStats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf-8'));
@@ -742,10 +858,6 @@ async function collect() {
         }
     } catch (e) {}
     
-    // Setup command handler
-    setupCommandHandler();
-    
-    // Vòng lặp chính
     let apiCallCount = 0;
     let errorCount = 0;
     
@@ -844,10 +956,6 @@ async function collect() {
             if (e.code === 'ECONNREFUSED') {
                 console.error(`   💡 Server localhost chưa chạy hoặc cổng sai`);
                 console.error(`   💡 Kiểm tra: ${API_URL}`);
-                console.error(`   💡 Thử chạy server trước hoặc dùng API khác`);
-            }
-            if (e.code === 'ENOTFOUND') {
-                console.error(`   💡 Không tìm thấy host. Kiểm tra URL: ${API_URL}`);
             }
         }
         
@@ -860,6 +968,28 @@ async function collect() {
         console.log(`⏳ Chờ ${waitTime/1000} giây...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
     }
+}
+
+// ========================= KHỞI ĐỘNG =========================
+async function main() {
+    console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
+    console.log("═══════════════════════════════════════════");
+    console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION.toLocaleString()} phiên`);
+    console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
+    console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
+    console.log(`🔗 API: ${API_URL}`);
+    console.log(`🌐 Web server port: ${PORT}`);
+    console.log(`⏱️ Tự động ping mỗi ${SELF_PING_INTERVAL/1000} giây`);
+    console.log("═══════════════════════════════════════════\n");
+    
+    // Khởi động web server
+    startWebServer();
+    
+    // Khởi động command handler
+    setupCommandHandler();
+    
+    // Chạy collector loop (bất đồng bộ)
+    collectorLoop().catch(console.error);
 }
 
 // Xử lý tắt chương trình
@@ -886,5 +1016,5 @@ process.on('unhandledRejection', (error) => {
     console.error('❌ Unhandled Rejection:', error);
 });
 
-// Chạy Collector
-collect().catch(console.error);
+// Chạy chính
+main().catch(console.error);
