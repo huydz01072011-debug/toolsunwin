@@ -3,45 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 
-// --- Cấu hình tự động lấy URL API ---
-let API_URL = process.env.API_URL || null; // Sẽ được gán động trong collect()
+// --- Cấu hình & Khởi tạo ---
+// Hỗ trợ cả localhost và API bên ngoài
+const API_URL = process.env.API_URL || "https://various-collaborative-heights-sue.trycloudflare.com/api/tx"; // Mặc định localhost
+// Hoặc dùng: const API_URL = "http://127.0.0.1:3000/api/tx";
 
-async function getAutoURL() {
-    // 1. Biến môi trường
-    if (process.env.API_URL) {
-        console.log(`🌐 Dùng API_URL từ môi trường: ${process.env.API_URL}`);
-        return process.env.API_URL;
-    }
-
-    // 2. File url_config.txt
-    const urlFile = path.join(__dirname, 'url_config.txt');
-    if (fs.existsSync(urlFile)) {
-        const url = fs.readFileSync(urlFile, 'utf-8').trim();
-        if (url) {
-            console.log(`🌐 Dùng URL từ file: ${url}`);
-            return url;
-        }
-    }
-
-    // 3. Tự quét localhost
-    const ports = [3000, 8080, 5000, 4000];
-    for (const port of ports) {
-        const testUrl = `http://127.0.0.1:${port}/api/tx`;
-        try {
-            const res = await axios.get(testUrl, { timeout: 3000 });
-            if (res.status === 200) {
-                console.log(`✅ Tìm thấy server local tại ${testUrl}`);
-                return testUrl;
-            }
-        } catch (e) {}
-    }
-
-    // 4. Fallback mặc định
-    console.warn('⚠️ Không tìm thấy server local, dùng URL mặc định: http://localhost:3000/api/tx');
-    return 'https://various-collaborative-heights-sue.trycloudflare.com/api/tx';
-}
-
-// --- Các hằng số & file ---
 const DATA_FILE = "collected_data/sunwin_tx.json";
 const STATS_FILE = "database/stats.json";
 const DETAILED_STATS_FILE = "database/detailed_stats.json";
@@ -50,7 +16,7 @@ const DETAILED_STATS_FILE = "database/detailed_stats.json";
 const MIN_DATA_FOR_PREDICTION = 10;
 const MAX_PREDICTIONS = 100000;
 const MAX_STORAGE = 1000000;
-const CHECK_INTERVAL = 60000; // 1 phút
+const CHECK_INTERVAL = 5000;
 
 const vnNow = () => {
     const d = new Date();
@@ -79,7 +45,6 @@ let detailedStats = {
         'Gãy 2-3': { total: 0, correct: 0, wrong: 0 },
         'Gãy 1-2-1': { total: 0, correct: 0, wrong: 0 },
         'Mẫu Lặp': { total: 0, correct: 0, wrong: 0 },
-        'Fibonacci': { total: 0, correct: 0, wrong: 0 }, // thêm loại mới
         'Vị cực đại': { total: 0, correct: 0, wrong: 0 },
         'Vị cực tiểu': { total: 0, correct: 0, wrong: 0 },
         'Vị bão hòa': { total: 0, correct: 0, wrong: 0 },
@@ -124,31 +89,12 @@ let stats = {
     worst_streak: 0
 };
 
-// =================== THUẬT TOÁN VIP ===================
-class TX_LogicPen_V5_VIP {
+class TX_LogicPen_V4 {
     constructor() {
         this.error_streak = 0;
         this.last_prediction = null;
         this.history = [];
         this.last_pattern = null;
-        this.weights = {
-            'Đu Bệt': 1.0,
-            'Bẻ Bệt Rồng': 1.2,
-            'Cầu Nối 1-1': 1.1,
-            'Cầu 2-2': 1.05,
-            'Cầu 3-3': 1.15,
-            'Gãy 3-2': 0.9,
-            'Gãy 2-3': 0.9,
-            'Gãy 1-2-1': 0.85,
-            'Mẫu Lặp': 1.3,
-            'Fibonacci': 1.25,     // VIP
-            'Vị cực đại': 0.95,
-            'Vị cực tiểu': 0.95,
-            'Vị bão hòa': 0.8,
-            'Vị cạn kiệt': 0.8,
-            'Vị ổn định': 0.75,
-            'Theo': 0.6
-        };
     }
 
     loadData(data) {
@@ -156,7 +102,7 @@ class TX_LogicPen_V5_VIP {
     }
 
     _arr() {
-        return this.history.map(s =>
+        return this.history.map(s => 
             (s.ket_qua || '').toUpperCase().replace('XỈU', 'XIU').replace('TÀI', 'TAI')
         );
     }
@@ -167,29 +113,6 @@ class TX_LogicPen_V5_VIP {
             .map(s => s.tong);
     }
 
-    // VIP: phát hiện chu kỳ Fibonacci
-    fiboAnalysis(arr) {
-        const fib = [1, 1, 2, 3, 5, 8, 13, 21];
-        const len = arr.length;
-        for (let f of fib) {
-            if (len >= f * 2) {
-                let pattern = arr.slice(0, f);
-                let match = true;
-                for (let i = f; i < len && i < f * 2; i++) {
-                    if (arr[i] !== pattern[i % f]) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) {
-                    const next = pattern[len % f];
-                    return { pred: next, conf: 86, type: "Fibonacci", reason: `Chu kỳ ${f} phiên` };
-                }
-            }
-        }
-        return null;
-    }
-
     cauSap(arr) {
         if (arr.length < 2) return null;
         let length = 1;
@@ -198,10 +121,10 @@ class TX_LogicPen_V5_VIP {
             else break;
         }
         if (length >= 2 && length <= 5) {
-            return { pred: arr[0], conf: 78, type: "Đu Bệt", reason: `Bệt ${length} phiên` };
+            return { pred: arr[0], conf: 72, type: "Đu Bệt", reason: `Bệt ${length} phiên` };
         }
         if (length >= 6) {
-            return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 85, type: "Bẻ Bệt Rồng", reason: `Bệt dài ${length} → hồi` };
+            return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 80, type: "Bẻ Bệt Rồng", reason: `Bệt dài ${length} → hồi` };
         }
         return null;
     }
@@ -211,30 +134,30 @@ class TX_LogicPen_V5_VIP {
         for (let i = 0; i < 4; i++) {
             if (arr[i] === arr[i + 1]) return null;
         }
-        return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 85, type: "Cầu Nối 1-1", reason: "Nhịp 1-1 ổn định" };
+        return { pred: arr[0] === "TAI" ? "XIU" : "TAI", conf: 82, type: "Cầu Nối 1-1", reason: "Nhịp 1-1 ổn định" };
     }
 
     cauDoi(arr) {
         if (arr.length < 4) return null;
         if (arr[0] === arr[1] && arr[2] === arr[3] && arr[0] !== arr[2]) {
-            return { pred: arr[2], conf: 80, type: "Cầu 2-2", reason: "AABB → B" };
+            return { pred: arr[2], conf: 78, type: "Cầu 2-2", reason: "AABB → B" };
         }
-        if (arr.length >= 6 && arr[0] === arr[1] && arr[1] === arr[2] &&
+        if (arr.length >= 6 && arr[0] === arr[1] && arr[1] === arr[2] && 
             arr[3] === arr[4] && arr[4] === arr[5] && arr[0] !== arr[3]) {
-            return { pred: arr[3], conf: 82, type: "Cầu 3-3", reason: "AAABBB → B" };
+            return { pred: arr[3], conf: 80, type: "Cầu 3-3", reason: "AAABBB → B" };
         }
         return null;
     }
 
     cauGay(arr) {
         if (arr.length >= 5 && arr[0] === arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[3] === arr[4]) {
-            return { pred: arr[3], conf: 76, type: "Gãy 3-2", reason: "AAABB → B" };
+            return { pred: arr[3], conf: 74, type: "Gãy 3-2", reason: "AAABB → B" };
         }
         if (arr.length >= 5 && arr[0] === arr[1] && arr[1] !== arr[2] && arr[2] === arr[3] && arr[3] === arr[4]) {
-            return { pred: arr[2], conf: 76, type: "Gãy 2-3", reason: "AABBB → B" };
+            return { pred: arr[2], conf: 74, type: "Gãy 2-3", reason: "AABBB → B" };
         }
         if (arr.length >= 4 && arr[0] !== arr[1] && arr[1] === arr[2] && arr[2] !== arr[3] && arr[0] === arr[3]) {
-            return { pred: arr[1], conf: 74, type: "Gãy 1-2-1", reason: "ABBA → B" };
+            return { pred: arr[1], conf: 72, type: "Gãy 1-2-1", reason: "ABBA → B" };
         }
         return null;
     }
@@ -246,7 +169,7 @@ class TX_LogicPen_V5_VIP {
             for (let i = len; i < arr.length - len; i++) {
                 let sub = arr.slice(i, i + len);
                 if (JSON.stringify(sub) === JSON.stringify(pattern) && arr[i - 1]) {
-                    return { pred: arr[i - 1], conf: 90, type: "Mẫu Lặp", reason: `Mẫu "${pattern.join(',')}"` };
+                    return { pred: arr[i - 1], conf: 88, type: "Mẫu Lặp", reason: `Mẫu "${pattern.join(',')}"` };
                 }
             }
         }
@@ -259,56 +182,27 @@ class TX_LogicPen_V5_VIP {
         const last = points[0], prev = points[1];
         const slice = points.slice(0, 5);
         const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
-        const variance = slice.reduce((sum, p) => sum + (p - avg) ** 2, 0) / slice.length;
 
-        if (last >= 15) return { pred: "XIU", conf: 80, type: "Vị cực đại", reason: `Điểm ${last} → hồi Xỉu` };
-        if (last <= 5) return { pred: "TAI", conf: 80, type: "Vị cực tiểu", reason: `Điểm ${last} → hồi Tài` };
-        if (avg > 11 && last > prev && variance < 2) return { pred: "XIU", conf: 72, type: "Vị bão hòa", reason: "Đà tăng chạm ngưỡng" };
-        if (avg < 10 && last < prev && variance < 2) return { pred: "TAI", conf: 72, type: "Vị cạn kiệt", reason: "Đà giảm chạm đáy" };
-        if (avg >= 11 && last >= 11 && last <= 13 && variance < 3) return { pred: "TAI", conf: 70, type: "Vị ổn định", reason: "Duy trì Tài nhẹ" };
-        if (avg <= 9 && last >= 7 && last <= 9 && variance < 3) return { pred: "XIU", conf: 70, type: "Vị ổn định", reason: "Duy trì Xỉu nhẹ" };
+        if (last >= 15) return { pred: "XIU", conf: 75, type: "Vị cực đại", reason: `Điểm ${last} → hồi Xỉu` };
+        if (last <= 5) return { pred: "TAI", conf: 75, type: "Vị cực tiểu", reason: `Điểm ${last} → hồi Tài` };
+        if (avg > 11 && last > prev) return { pred: "XIU", conf: 68, type: "Vị bão hòa", reason: "Đà tăng chạm ngưỡng" };
+        if (avg < 10 && last < prev) return { pred: "TAI", conf: 68, type: "Vị cạn kiệt", reason: "Đà giảm chạm đáy" };
+        if (avg >= 11 && last >= 11 && last <= 13) return { pred: "TAI", conf: 65, type: "Vị ổn định", reason: "Duy trì Tài nhẹ" };
+        if (avg <= 9 && last >= 7 && last <= 9) return { pred: "XIU", conf: 65, type: "Vị ổn định", reason: "Duy trì Xỉu nhẹ" };
         return null;
-    }
-
-    weightedCombine(predictions) {
-        if (predictions.length === 0) return null;
-        let best = predictions[0];
-        let bestScore = -Infinity;
-        for (let p of predictions) {
-            let w = this.weights[p.type] || 1.0;
-            let score = p.conf * w;
-            if (score > bestScore) {
-                bestScore = score;
-                best = p;
-            }
-        }
-        return best;
     }
 
     tongHopDuDoan() {
         const arr = this._arr();
         if (arr.length < 2) return null;
-        const candidates = [];
-
-        const fib = this.fiboAnalysis(arr);
-        if (fib) candidates.push(fib);
-        const m = this.phatHienMauLap(arr);
-        if (m) candidates.push(m);
-        const noi = this.cauNoi(arr);
-        if (noi) candidates.push(noi);
-        const doi = this.cauDoi(arr);
-        if (doi) candidates.push(doi);
-        const gay = this.cauGay(arr);
-        if (gay) candidates.push(gay);
-        const sap = this.cauSap(arr);
-        if (sap) candidates.push(sap);
-        const vi = this.duDoanVi();
-        if (vi) candidates.push(vi);
-        candidates.push({ pred: arr[0], conf: 55, type: "Theo", reason: "Bám phiên cuối" });
-
-        const best = this.weightedCombine(candidates);
-        if (best) this.last_pattern = best.type;
-        return best;
+        const result = this.phatHienMauLap(arr) || this.cauNoi(arr) || this.cauDoi(arr) ||
+               this.cauGay(arr) || this.cauSap(arr) || this.duDoanVi() ||
+               { pred: arr[0], conf: 55, type: "Theo", reason: "Bám phiên cuối" };
+        
+        if (result) {
+            this.last_pattern = result.type;
+        }
+        return result;
     }
 
     apDungDaoChieu(p) {
@@ -318,7 +212,7 @@ class TX_LogicPen_V5_VIP {
             return {
                 ...p,
                 pred: p.pred === "TAI" ? "XIU" : "TAI",
-                conf: Math.min(90, p.conf + 12),
+                conf: Math.min(88, p.conf + 10),
                 reason: `🔄 Đảo: ${p.reason}`
             };
         }
@@ -330,6 +224,7 @@ class TX_LogicPen_V5_VIP {
         let result = this.tongHopDuDoan();
         if (result) result = this.apDungDaoChieu(result);
         else result = { pred: this._arr()[0] || "TAI", conf: 50, type: "Theo", reason: "Không đủ dữ liệu" };
+        
         this.last_prediction = result.pred;
         return result;
     }
@@ -343,7 +238,7 @@ class TX_LogicPen_V5_VIP {
     }
 }
 
-const predictor = new TX_LogicPen_V5_VIP();
+const predictor = new TX_LogicPen_V4();
 
 // --- Helper Functions ---
 function loadHistory() {
@@ -777,7 +672,7 @@ function safeInt(v, d = 0) {
     return isNaN(parsed) ? d : parsed;
 }
 
-// Hàm kiểm tra kết nối (sử dụng API_URL hiện tại)
+// Hàm kiểm tra kết nối localhost
 async function testLocalhost() {
     try {
         console.log(`🔍 Đang kiểm tra kết nối đến ${API_URL}...`);
@@ -810,19 +705,15 @@ async function testLocalhost() {
 
 // --- Main Collector ---
 async function collect() {
-    // Tự động lấy URL API
-    API_URL = await getAutoURL();
-    
-    console.log("🚀 SUNWIN TX COLLECTOR VIP - KHỞI ĐỘNG");
+    console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
     console.log("═══════════════════════════════════════════");
     console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION.toLocaleString()} phiên`);
     console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
     console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
     console.log(`🔗 API: ${API_URL}`);
-    console.log(`⏱️  Chu kỳ ping: ${CHECK_INTERVAL/1000} giây`);
     console.log("═══════════════════════════════════════════\n");
     
-    // Kiểm tra kết nối
+    // Kiểm tra kết nối localhost
     const isConnected = await testLocalhost();
     if (!isConnected) {
         console.log(`\n⚠️ Vẫn tiếp tục chạy nhưng có thể không lấy được dữ liệu`);
