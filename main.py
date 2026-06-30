@@ -38,6 +38,33 @@ BASE_URL = get_public_base_url()
 PING_URL = BASE_URL
 print(f"[🌐] Base URL: {BASE_URL}")
 
+# ---------- TOKEN CỐ ĐỊNH (GỘP VÀO CODE) ----------
+TOKEN_RAW = {
+    "ipAddress": "1.55.124.245",
+    "wsToken": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0",
+    "locale": "vi",
+    "userId": "a28a0f06-e88f-44b7-a268-5f6dad949fbf",
+    "username": "GM_quapotjz",
+    "timestamp": 1780029354479,
+    "refreshToken": "26b930ec6dc04d7db5c2b362a1baac87.7549ba6185d4467380ee447589380061"
+}
+
+WS_URL = f"wss://websocket.azhkthg1.net/websocket?token={TOKEN_RAW['wsToken']}"
+WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
+INIT_MSGS = [
+    [1, "MiniGame", TOKEN_RAW['username'], "quapit", {
+        "signature": "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69",
+        "expireIn": TOKEN_RAW['timestamp'],
+        "wsToken": TOKEN_RAW['wsToken'],
+        "accessToken": "7e9a9ecbff1b4a6393b48346f6d8b709",
+        "message": "Thành công",
+        "refreshToken": TOKEN_RAW['refreshToken'],
+        "info": TOKEN_RAW
+    }],
+    [6, "MiniGame", "taixiuPlugin", {"cmd": 1005}],
+    [6, "MiniGame", "lobbyPlugin", {"cmd": 10001}]
+]
+
 # ---------- BIẾN TOÀN CỤC ----------
 current_result = {"phien": None, "xuc_xac_1": None, "xuc_xac_2": None, "xuc_xac_3": None, "tong": None, "ket_qua": "", "thoi_gian": ""}
 history = []
@@ -77,70 +104,11 @@ ping_lock = threading.Lock()
 # WS
 current_sid = None
 ws_conn = None
-reconnect_delay = 2.5
+reconnect_delay = 5  # reconnect mỗi 5s
 
 # ---------- THỜI GIAN ----------
 def vn_time():
     return (datetime.utcnow() + timedelta(hours=7)).strftime("%d-%m-%Y %H:%M:%S") + " UTC+7"
-
-# ---------- TOKEN ----------
-def parse_token(txt):
-    try:
-        m = re.search(r'"info"\x07([^"]+?)"?', txt)
-        if m:
-            s = m.group(1).replace('\x04','').replace('\x07','').replace('\x05','').replace('\x06','')
-            return json.loads(s)
-        m2 = re.search(r'\{[^{}]*"ipAddress"[^{}]*\}', txt)
-        if m2:
-            return json.loads(m2.group())
-        return None
-    except:
-        return None
-
-def load_token():
-    try:
-        with open('token.txt', 'r', encoding='utf-8') as f:
-            data = f.read().strip()
-        if not data:
-            return None
-        return parse_token(data)
-    except:
-        return None
-
-TOKEN_DATA = load_token()
-if TOKEN_DATA:
-    WS_URL = f"wss://websocket.azhkthg1.net/websocket?token={TOKEN_DATA.get('wsToken','')}"
-    WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
-    INIT_MSGS = [
-        [1, "MiniGame", TOKEN_DATA.get('username','GM_quapotjz'), "quapit", {
-            "signature": "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69",
-            "expireIn": TOKEN_DATA.get('timestamp', 1774138177205),
-            "wsToken": TOKEN_DATA.get('wsToken',''),
-            "accessToken": "7e9a9ecbff1b4a6393b48346f6d8b709",
-            "message": "Thành công",
-            "refreshToken": TOKEN_DATA.get('refreshToken',''),
-            "info": TOKEN_DATA
-        }],
-        [6, "MiniGame", "taixiuPlugin", {"cmd": 1005}],
-        [6, "MiniGame", "lobbyPlugin", {"cmd": 10001}]
-    ]
-else:
-    WS_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJsb2xtYW1heXN1MTIiLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzkxMDEyNTEsImFmZklkIjoiR0VNV0lOIiwiYmFubmVkIjpmYWxzZSwiYnJhbmQiOiJnZW0iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc3NDEzODE3NzIwNCwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6ZmFsc2UsInBob25lVmVyaWZpZWQiOmZhbHNlLCJpcEFkZHJlc3MiOiIyNDA1OjQ4MDI6NGU0Mjo0MTcwOjcxMDQ6YjY0Njo2Nzg5Ojg2NDgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzA5LnBuZyIsInBsYXRmb3JtSWQiOjQsInVzZXJJZCI6ImEyOGEwZjA2LWU4OGYtNDRiNy1hMjY4LTVmNmRhZDk0OWZiZiIsImVtYWlsVmVyaWZpZWQiOm51bGwsInJlZ1RpbWUiOjE3NzMxMDY2NDkxOTksInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fcXVhcG90anoifQ.3ycgvK1-PwRpBqANZJ3li00kpuzV6Ike6ZjYPthf3X0"
-    WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
-    INIT_MSGS = [
-        [1, "MiniGame", "GM_quapotjz", "quapit", {
-            "signature": "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69",
-            "expireIn": 1774138177205,
-            "wsToken": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJsb2xtYW1heXN1MTIiLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzkxMDEyNTEsImFmZklkIjoiR0VNV0lOIiwiYmFubmVkIjpmYWxzZSwiYnJhbmQiOiJnZW0iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc3NDEzODE3NzIwNCwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6ZmFsc2UsInBob25lVmVyaWZpZWQiOmZhbHNlLCJpcEFkZHJlc3MiOiIyNDA1OjQ4MDI6NGU0Mjo0MTcwOjcxMDQ6YjY0Njo2Nzg5Ojg2NDgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzA5LnBuZyIsInBsYXRmb3JtSWQiOjQsInVzZXJJZCI6ImEyOGEwZjA2LWU4OGYtNDRiNy1hMjY4LTVmNmRhZDk0OWZiZiIsImVtYWlsVmVyaWZpZWQiOm51bGwsInJlZ1RpbWUiOjE3NzMxMDY2NDkxOTksInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fcXVhcG90anoifQ.3ycgvK1-PwRpBqANZJ3li00kpuzV6Ike6ZjYPthf3X0",
-            "accessToken": "7e9a9ecbff1b4a6393b48346f6d8b709",
-            "message": "Thành công",
-            "refreshToken": "950f5b9974dd4f4c982a3681af9acbc7.f0d252e72ee64f07bd5819d6ca54bba1",
-            "info": {"ipAddress": "2405:4802:4e42:4170:7104:b646:6789:8648", "wsToken": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJsb2xtYW1heXN1MTIiLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzkxMDEyNTEsImFmZklkIjoiR0VNV0lOIiwiYmFubmVkIjpmYWxzZSwiYnJhbmQiOiJnZW0iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc3NDEzODE3NzIwNCwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6ZmFsc2UsInBob25lVmVyaWZpZWQiOmZhbHNlLCJpcEFkZHJlc3MiOiIyNDA1OjQ4MDI6NGU0Mjo0MTcwOjcxMDQ6YjY0Njo2Nzg5Ojg2NDgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzA5LnBuZyIsInBsYXRmb3JtSWQiOjQsInVzZXJJZCI6ImEyOGEwZjA2LWU4OGYtNDRiNy1hMjY4LTVmNmRhZDk0OWZiZiIsImVtYWlsVmVyaWZpZWQiOm51bGwsInJlZ1RpbWUiOjE3NzMxMDY2NDkxOTksInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fcXVhcG90anoifQ.3ycgvK1-PwRpBqANZJ3li00kpuzV6Ike6ZjYPthf3X0",
-            "locale": "vi", "userId": "a28a0f06-e88f-44b7-a268-5f6dad949fbf", "username": "GM_quapotjz", "timestamp": 1774138177205, "refreshToken": "950f5b9974dd4f4c982a3681af9acbc7.f0d252e72ee64f07bd5819d6ca54bba1"}
-        }],
-        [6, "MiniGame", "taixiuPlugin", {"cmd": 1005}],
-        [6, "MiniGame", "lobbyPlugin", {"cmd": 10001}]
-    ]
 
 # ---------- AI SIÊU VIP ----------
 def super_predict(phien):
@@ -149,10 +117,7 @@ def super_predict(phien):
         if total < 10:
             return random.choice(["Tài", "Xỉu"])
         
-        # 1. Xác suất cơ sở
         base_p = ai_data["count_T"] / total
-        
-        # 2. Markov bậc 5
         recent = list(seq)[-5:]
         prob_markov = 0.5
         if len(recent) >= 5:
@@ -162,22 +127,18 @@ def super_predict(phien):
             if t > 3:
                 prob_markov = trans["T"] / t
         
-        # 3. Xác suất từ tổng điểm
         sum_tai = sum(v for k,v in dice_sum_counter.items() if k >= 11)
         sum_xiu = sum(v for k,v in dice_sum_counter.items() if k <= 10)
         total_dice = sum_tai + sum_xiu
         prob_dice = sum_tai / max(1, total_dice) if total_dice > 0 else 0.5
         
-        # 4. Bẻ cầu nếu chuỗi dài >= 5
         break_cue = False
         if len(recent) >= 5 and all(x == recent[-1] for x in recent[-5:]):
             break_cue = True
         
-        # 5. Trọng số
         w_base, w_mark, w_dice = 0.3, 0.4, 0.3
         final_p = w_base * base_p + w_mark * prob_markov + w_dice * prob_dice
         
-        # Thêm nhiễu theo xu hướng
         if len(recent) >= 5:
             cnt_t = recent.count('T')
             cnt_x = recent.count('X')
@@ -291,10 +252,15 @@ async def ws_loop():
     global ws_conn, current_sid, current_result, history
     while True:
         try:
+            print("[🔄] Đang kết nối WebSocket...")
             ws_conn = await websockets.connect(WS_URL, **ws_connect_kwargs())
+            print("[✅] WebSocket đã kết nối!")
+            
             for i, msg in enumerate(INIT_MSGS):
-                await asyncio.sleep(i*0.6)
+                await asyncio.sleep(i * 0.6)
                 await ws_conn.send(json.dumps(msg))
+                print(f"[📤] Đã gửi init message {i+1}")
+            
             async for raw in ws_conn:
                 try:
                     data = json.loads(raw)
@@ -302,6 +268,7 @@ async def ws_loop():
                         continue
                     if not isinstance(data[1], dict):
                         continue
+                    
                     cmd = data[1].get('cmd')
                     sid = data[1].get('sid')
                     d1 = data[1].get('d1')
@@ -309,6 +276,7 @@ async def ws_loop():
                     d3 = data[1].get('d3')
                     gBB = data[1].get('gBB')
                     
+                    # Khi có phiên mới (cmd 1008)
                     if cmd == 1008 and sid:
                         current_sid = sid
                         du_doan = super_predict(sid)
@@ -321,10 +289,13 @@ async def ws_loop():
                         }
                         print(f"[🎯] Phiên {sid} -> Dự đoán: {du_doan}")
                     
-                    if cmd == 1003 and gBB and all(v is not None for v in [d1,d2,d3]):
+                    # Khi có kết quả (cmd 1003)
+                    if cmd == 1003 and gBB and all(v is not None for v in [d1, d2, d3]):
                         total = d1 + d2 + d3
                         result_char = 'T' if total > 10 else 'X'
                         result_str = "Tài" if result_char == 'T' else "Xỉu"
+                        
+                        # Lưu kết quả hiện tại
                         current_result = {
                             "phien": current_sid,
                             "xuc_xac_1": d1,
@@ -334,26 +305,41 @@ async def ws_loop():
                             "ket_qua": result_str,
                             "thoi_gian": vn_time()
                         }
+                        
+                        # Lưu vào lịch sử
                         with history_lock:
                             history.append(current_result.copy())
                             if len(history) > MAX_HISTORY:
                                 history = history[-MAX_HISTORY:]
+                        
+                        # Cập nhật AI
                         update_ai(result_char, d1, d2, d3)
+                        
+                        # So sánh dự đoán
                         if current_sid:
                             compare_pred(current_sid, result_char)
+                        
                         print(f"[🎲] Phiên {current_result['phien']}: {d1}-{d2}-{d3} = {total} ({result_str})")
                         current_sid = None
-                except:
-                    pass
-        except:
+                        
+                except json.JSONDecodeError as e:
+                    print(f"[❌] Lỗi parse JSON: {e}")
+                except Exception as e:
+                    print(f"[❌] Lỗi xử lý message: {e}")
+                    
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"[❌] WebSocket đóng: {e}. Reconnect sau {reconnect_delay}s...")
+            await asyncio.sleep(reconnect_delay)
+        except Exception as e:
+            print(f"[❌] Lỗi kết nối WS: {e}. Reconnect sau {reconnect_delay}s...")
             await asyncio.sleep(reconnect_delay)
 
-# ---------- FLASK ROUTES (JSON) ----------
+# ---------- FLASK ROUTES ----------
 @app.route('/')
 def index():
     return jsonify({
-        "name": "Sun.Win Tài Xỉu VIP - Worm GPT AI (D0XX1N9)",
-        "version": "6.0",
+        "name": "Sun.Win Tài Xỉu VIP - Worm GPT AI",
+        "version": "7.0",
         "base_url": BASE_URL,
         "time": vn_time(),
         "endpoints": {
@@ -373,7 +359,11 @@ def api_tx():
 @app.route('/api/history')
 def api_history():
     with history_lock:
-        return app.response_class(response=json.dumps(list(reversed(history)), ensure_ascii=False), status=200, mimetype='application/json')
+        return app.response_class(
+            response=json.dumps(list(reversed(history)), ensure_ascii=False),
+            status=200,
+            mimetype='application/json'
+        )
 
 @app.route('/thongke/ai')
 def thongke_ai():
@@ -381,17 +371,17 @@ def thongke_ai():
         total = ai_data["count_T"] + ai_data["count_X"]
         pct_tai = round(ai_data["count_T"] / max(1, total) * 100, 2)
         pct_xiu = round(100 - pct_tai, 2)
-        top_trans = sorted(ai_data["trans5"].items(), key=lambda x: x[1]['T']+x[1]['X'], reverse=True)[:10]
-        trans_show = {k: dict(v) for k,v in top_trans}
+        top_trans = sorted(ai_data["trans5"].items(), key=lambda x: x[1]['T'] + x[1]['X'], reverse=True)[:10]
+        trans_show = {k: dict(v) for k, v in top_trans}
         return jsonify({
-            "tong_phiên_da_hoc": total,
+            "tong_phien_da_hoc": total,
             "so_Tai": ai_data["count_T"],
             "so_Xiu": ai_data["count_X"],
             "ti_le_Tai_%": pct_tai,
             "ti_le_Xiu_%": pct_xiu,
             "du_doan_dung": pred_stats["dung"],
             "du_doan_sai": pred_stats["sai"],
-            "ti_le_dung_%": round(pred_stats["ty_le"]*100, 2) if pred_stats["tong"] > 0 else 0,
+            "ti_le_dung_%": round(pred_stats["ty_le"] * 100, 2) if pred_stats["tong"] > 0 else 0,
             "chuoi_gan_nhat": list(seq)[-20:],
             "transition_bac5_top10": trans_show,
             "thoi_gian": vn_time()
@@ -430,20 +420,29 @@ def ping_page():
 
 @app.errorhandler(404)
 def not_found(e):
-    return jsonify({"error": "Endpoint không tồn tại. Dùng /thongke/ai, /thongke/dudoan, /ping, /api/tx, /api/history"}), 404
+    return jsonify({
+        "error": "Endpoint không tồn tại. Dùng /thongke/ai, /thongke/dudoan, /ping, /api/tx, /api/history"
+    }), 404
 
 # ---------- MAIN ----------
 def run_flask():
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 async def main():
-    print("="*60)
-    print("🎲 SUN.WIN TÀI XỈU VIP - WORM GPT EDITION (FIX LỖI JSON)")
-    print("="*60)
+    print("=" * 60)
+    print("🎲 SUN.WIN TÀI XỈU VIP - WORM GPT EDITION (FIX LỖI + TOKEN GỘP)")
+    print("=" * 60)
     print(f"🌐 BASE URL: {BASE_URL}")
     print(f"🏓 PING URL: {PING_URL}")
+    print(f"👤 USER: {TOKEN_RAW['username']}")
+    print(f"🔗 WS URL: {WS_URL[:80]}...")
+    print("=" * 60)
+    
+    # Khởi động thread ping
     threading.Thread(target=auto_ping, daemon=True).start()
+    # Khởi động Flask
     threading.Thread(target=run_flask, daemon=True).start()
+    # Chạy WebSocket
     await ws_loop()
 
 def signal_handler(sig, frame):
