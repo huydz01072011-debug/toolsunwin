@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify
 from flask_cors import CORS
 import os
 import signal
@@ -45,19 +45,21 @@ history_lock = threading.Lock()
 MAX_HISTORY = 100000
 
 # Dự đoán
-pred_dict = {}          # phiên -> thông tin dự đoán
+pred_dict = {}
 pred_stats = {"tong": 0, "dung": 0, "sai": 0, "ty_le": 0.0}
 
-# Học AI – nâng cấp
-seq = deque(maxlen=50)           # lưu chuỗi 'T'/'X' dài hơn để phân tích trend
+# AI siêu cấp
+seq = deque(maxlen=100)
 ai_data = {
     "count_T": 0,
     "count_X": 0,
-    "trans1": defaultdict(lambda: {"T": 0, "X": 0}),   # Markov bậc 1
-    "trans3": defaultdict(lambda: {"T": 0, "X": 0}),   # bậc 3 (3 ký tự)
-    "trans5": defaultdict(lambda: {"T": 0, "X": 0})    # bậc 5 (5 ký tự)
+    "trans1": defaultdict(lambda: {"T": 0, "X": 0}),
+    "trans2": defaultdict(lambda: {"T": 0, "X": 0}),
+    "trans3": defaultdict(lambda: {"T": 0, "X": 0}),
+    "trans5": defaultdict(lambda: {"T": 0, "X": 0})
 }
-dice_sum_counter = defaultdict(int)   # tổng 3-18
+dice_sum_counter = defaultdict(int)
+face_counter = [defaultdict(int) for _ in range(3)]
 ai_lock = threading.Lock()
 
 # Ping
@@ -81,7 +83,7 @@ reconnect_delay = 2.5
 def vn_time():
     return (datetime.utcnow() + timedelta(hours=7)).strftime("%d-%m-%Y %H:%M:%S") + " UTC+7"
 
-# ---------- TOKEN (giữ nguyên) ----------
+# ---------- TOKEN ----------
 def parse_token(txt):
     try:
         m = re.search(r'"info"\x07([^"]+?)"?', txt)
@@ -140,52 +142,58 @@ else:
         [6, "MiniGame", "lobbyPlugin", {"cmd": 10001}]
     ]
 
-# ---------- AI SIÊU VIP (NÂNG CẤP) ----------
+# ---------- AI SIÊU VIP ----------
 def super_predict(phien):
     with ai_lock:
         total = ai_data["count_T"] + ai_data["count_X"]
         if total < 10:
             return random.choice(["Tài", "Xỉu"])
         
-        # 1. Xác suất cơ sở từ tổng thể
+        # 1. Xác suất cơ sở
         base_p = ai_data["count_T"] / total
         
-        # 2. Markov bậc 5 (dùng 5 kết quả gần nhất)
+        # 2. Markov bậc 5
         recent = list(seq)[-5:]
         prob_markov = 0.5
         if len(recent) >= 5:
-            key = ''.join(recent[-5:])   # ví dụ "TTXTT"
+            key = ''.join(recent[-5:])
             trans = ai_data["trans5"][key]
             t = trans["T"] + trans["X"]
             if t > 3:
                 prob_markov = trans["T"] / t
         
-        # 3. Xác suất từ tổng điểm cụ thể (dice_sum_counter)
+        # 3. Xác suất từ tổng điểm
         sum_tai = sum(v for k,v in dice_sum_counter.items() if k >= 11)
         sum_xiu = sum(v for k,v in dice_sum_counter.items() if k <= 10)
         total_dice = sum_tai + sum_xiu
         prob_dice = sum_tai / max(1, total_dice) if total_dice > 0 else 0.5
         
-        # 4. Bẻ cầu nếu chuỗi dài >= 5 giống nhau
+        # 4. Bẻ cầu nếu chuỗi dài >= 5
         break_cue = False
         if len(recent) >= 5 and all(x == recent[-1] for x in recent[-5:]):
             break_cue = True
         
-        # 5. Trọng số kết hợp (ưu tiên Markov và bẻ cầu)
+        # 5. Trọng số
         w_base, w_mark, w_dice = 0.3, 0.4, 0.3
         final_p = w_base * base_p + w_mark * prob_markov + w_dice * prob_dice
         
-        # Nếu bẻ cầu -> đánh ngược
-        if break_cue:
-            return "Xỉu" if recent[-1] == "T" else "Tài"
+        # Thêm nhiễu theo xu hướng
+        if len(recent) >= 5:
+            cnt_t = recent.count('T')
+            cnt_x = recent.count('X')
+            if cnt_t >= 4:
+                final_p = min(1.0, final_p + 0.05)
+            elif cnt_x >= 4:
+                final_p = max(0.0, final_p - 0.05)
         
-        # Điều chỉnh ngưỡng để tăng tỷ lệ "ảo"
-        if final_p > 0.52:
+        if break_cue:
+            return "Xỉu" if recent[-1] == 'T' else "Tài"
+        
+        if final_p > 0.53:
             return "Tài"
-        elif final_p < 0.48:
+        elif final_p < 0.47:
             return "Xỉu"
         else:
-            # Khi bất định, ưu tiên cửa đang có xu hướng (dựa trên 5 gần nhất)
             if len(recent) >= 3:
                 cnt_t = recent.count('T')
                 cnt_x = recent.count('X')
@@ -199,21 +207,27 @@ def update_ai(result_char, d1, d2, d3):
     with ai_lock:
         s = d1 + d2 + d3
         dice_sum_counter[s] += 1
+        for i, val in enumerate([d1, d2, d3]):
+            face_counter[i][val] += 1
+        
         if result_char == 'T':
             ai_data["count_T"] += 1
         else:
             ai_data["count_X"] += 1
         
-        # Cập nhật Markov
         if len(seq) > 0:
             prev = seq[-1]
             ai_data["trans1"][prev][result_char] += 1
+        if len(seq) >= 1:
+            prev2 = ''.join(list(seq)[-2:]) if len(seq) >= 2 else seq[-1]
+            if len(prev2) == 2:
+                ai_data["trans2"][prev2][result_char] += 1
         if len(seq) >= 2:
-            key3 = ''.join(list(seq)[-3:])
-            ai_data["trans3"][key3][result_char] += 1
+            prev3 = ''.join(list(seq)[-3:])
+            ai_data["trans3"][prev3][result_char] += 1
         if len(seq) >= 4:
-            key5 = ''.join(list(seq)[-5:])
-            ai_data["trans5"][key5][result_char] += 1
+            prev5 = ''.join(list(seq)[-5:])
+            ai_data["trans5"][prev5][result_char] += 1
         
         seq.append(result_char)
 
@@ -334,48 +348,23 @@ async def ws_loop():
         except:
             await asyncio.sleep(reconnect_delay)
 
-# ---------- FLASK ROUTES (SỬA LỖI TEMPLATE) ----------
-# Template chính, không chứa biểu thức jinja2 trong style
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{{title}}</title>
-<style>
-body { background: #0b0e14; color: #c8d0dc; font-family: 'Segoe UI', monospace; padding: 20px; }
-.container { max-width: 1200px; margin: auto; }
-h1 { color: #00f5d4; border-bottom: 2px solid #1f2a36; padding-bottom: 10px; }
-.table-wrap { overflow-x: auto; background: #141a22; padding: 15px; border-radius: 12px; margin: 15px 0; }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th { background: #1f2a36; color: #00d4b8; padding: 10px; text-align: left; }
-td { padding: 8px 10px; border-bottom: 1px solid #1f2a36; }
-tr:hover { background: #1a222c; }
-.badge { padding: 3px 10px; border-radius: 20px; font-weight: bold; }
-.badge-win { background: #0f5c3a; color: #5cf0b0; }
-.badge-lose { background: #5c1a1a; color: #f05c5c; }
-.badge-tai { background: #1a3a5c; color: #5cb8f0; }
-.badge-xiu { background: #4a2a5c; color: #d48cf0; }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap: 15px; margin: 20px 0; }
-.stat-card { background: #141a22; padding: 15px; border-radius: 10px; border-left: 4px solid #00f5d4; }
-.stat-label { font-size: 12px; color: #7a8a9a; text-transform: uppercase; }
-.stat-value { font-size: 24px; font-weight: bold; color: #e0f0ff; }
-.progress-bar { background: #1f2a36; height: 20px; border-radius: 10px; overflow: hidden; margin: 5px 0; }
-.progress-fill { height: 100%; background: linear-gradient(90deg, #00d4b8, #00f5d4); }
-</style>
-</head>
-<body>
-<div class="container">
-<h1>🎲 {{title}}</h1>
-<p><strong>Thời gian:</strong> {{time}} | <strong>Base URL:</strong> {{base_url}}</p>
-{{{body}}}
-</div>
-</body>
-</html>
-"""
-
+# ---------- FLASK ROUTES (JSON) ----------
 @app.route('/')
 def index():
-    body = '<div class="stats-grid"><div class="stat-card"><div class="stat-label">🚀 Server</div><div class="stat-value">Đang chạy</div></div></div><p>Dùng <code>/thongke/ai</code>, <code>/thongke/dudoan</code>, <code>/ping</code> để xem giao diện.</p>'
-    return render_template_string(HTML_TEMPLATE, title="Sun.Win Tài Xỉu VIP", time=vn_time(), base_url=BASE_URL, body=body)
+    return jsonify({
+        "name": "Sun.Win Tài Xỉu VIP - Worm GPT AI",
+        "version": "5.0",
+        "base_url": BASE_URL,
+        "time": vn_time(),
+        "endpoints": {
+            "/api/tx": "Kết quả mới nhất",
+            "/api/history": f"Lịch sử {MAX_HISTORY} phiên (mới nhất -> cũ)",
+            "/thongke/ai": "Thống kê AI chi tiết",
+            "/thongke/dudoan": "Lịch sử dự đoán đúng/sai",
+            "/ping": "Thống kê ping keep-alive"
+        },
+        "status": "running"
+    })
 
 @app.route('/api/tx')
 def api_tx():
@@ -392,21 +381,21 @@ def thongke_ai():
         total = ai_data["count_T"] + ai_data["count_X"]
         pct_tai = round(ai_data["count_T"] / max(1, total) * 100, 2)
         pct_xiu = round(100 - pct_tai, 2)
-        stats = {
-            "Tổng phiên đã học": total,
-            "Số Tài": ai_data["count_T"],
-            "Số Xỉu": ai_data["count_X"],
-            "Tỉ lệ Tài": f"{pct_tai}%",
-            "Tỉ lệ Xỉu": f"{pct_xiu}%",
-            "Dự đoán đúng": pred_stats["dung"],
-            "Dự đoán sai": pred_stats["sai"],
-            "Tỉ lệ đúng": f"{round(pred_stats['ty_le']*100,2)}%" if pred_stats["tong"]>0 else "0%",
-            "Chuỗi gần nhất": " → ".join(list(seq)[-10:])
-        }
-        rows = ''.join([f'<tr><td>{k}</td><td><strong>{v}</strong></td></tr>' for k,v in stats.items()])
-        body = f'<div class="table-wrap"><table><tr><th>Chỉ số AI</th><th>Giá trị</th></tr>{rows}</table></div>'
-        body += f'<div class="stats-grid"><div class="stat-card"><div class="stat-label">Tài/Xỉu</div><div class="progress-bar"><div class="progress-fill" style="width:{pct_tai}%;"></div></div><span>Tài {pct_tai}% - Xỉu {pct_xiu}%</span></div></div>'
-    return render_template_string(HTML_TEMPLATE, title="📊 Thống kê AI", time=vn_time(), base_url=BASE_URL, body=body)
+        top_trans = sorted(ai_data["trans5"].items(), key=lambda x: x[1]['T']+x[1]['X'], reverse=True)[:10]
+        trans_show = {k: dict(v) for k,v in top_trans}
+        return jsonify({
+            "tong_phiên_da_hoc": total,
+            "so_Tai": ai_data["count_T"],
+            "so_Xiu": ai_data["count_X"],
+            "ti_le_Tai_%": pct_tai,
+            "ti_le_Xiu_%": pct_xiu,
+            "du_doan_dung": pred_stats["dung"],
+            "du_doan_sai": pred_stats["sai"],
+            "ti_le_dung_%": round(pred_stats["ty_le"]*100, 2) if pred_stats["tong"] > 0 else 0,
+            "chuoi_gan_nhat": list(seq)[-20:],
+            "transition_bac5_top10": trans_show,
+            "thoi_gian": vn_time()
+        })
 
 @app.route('/thongke/dudoan')
 def thongke_dudoan():
@@ -416,32 +405,32 @@ def thongke_dudoan():
             "phien": phien,
             "du_doan": info["du_doan"],
             "thuc_te": info.get("ket_qua_thuc_te", "Chờ"),
-            "kq": info.get("dung_sai", "Chưa có")
+            "dung_sai": info.get("dung_sai", "Chưa")
         })
     items.sort(key=lambda x: int(x["phien"]) if str(x["phien"]).isdigit() else 0, reverse=True)
-    rows = ''.join([f'<tr><td>{i["phien"]}</td><td><span class="badge {"badge-tai" if i["du_doan"]=="Tài" else "badge-xiu"}">{i["du_doan"]}</span></td><td><span class="badge {"badge-tai" if i["thuc_te"]=="Tài" else "badge-xiu"}">{i["thuc_te"]}</span></td><td><span class="badge {"badge-win" if i["kq"]=="Đúng" else "badge-lose" if i["kq"]=="Sai" else ""}">{i["kq"]}</span></td></tr>' for i in items[:200]])
-    body = f'<div class="table-wrap"><table><tr><th>Phiên</th><th>Dự đoán</th><th>Kết quả thực</th><th>Đúng/Sai</th></tr>{rows if rows else "<tr><td colspan=4>Chưa có dữ liệu</td></tr>"}</table></div><p><i>Hiển thị 200 phiên mới nhất</i></p>'
-    return render_template_string(HTML_TEMPLATE, title="📝 Lịch sử dự đoán", time=vn_time(), base_url=BASE_URL, body=body)
+    return jsonify({
+        "tong_so_du_doan": len(items),
+        "chi_tiet_200_moi_nhat": items[:200],
+        "thoi_gian": vn_time()
+    })
 
 @app.route('/ping')
 def ping_page():
     with ping_lock:
-        rows = ''.join([f'<tr><td>{h["time"]}</td><td>{h["status"]}</td><td>{h["ms"] if h["ms"] else "---"} ms</td></tr>' for h in list(ping_stats["history"])[-30:]])
-        stats = {
-            "URL đang ping": ping_stats["url"],
-            "Tổng ping": ping_stats["total"],
-            "Thành công": ping_stats["success"],
-            "Thất bại": ping_stats["fail"],
-            "Trạng thái cuối": ping_stats["last_status"],
-            "Lần cuối": ping_stats["last_time"] or "N/A"
-        }
-        stat_html = ''.join([f'<div class="stat-card"><div class="stat-label">{k}</div><div class="stat-value">{v}</div></div>' for k,v in stats.items()])
-        body = f'<div class="stats-grid">{stat_html}</div><div class="table-wrap"><table><tr><th>Thời gian</th><th>Trạng thái</th><th>Phản hồi</th></tr>{rows if rows else "<tr><td colspan=3>Chưa ping</td></tr>"}</table></div>'
-    return render_template_string(HTML_TEMPLATE, title="🏓 PING KEEP-ALIVE", time=vn_time(), base_url=BASE_URL, body=body)
+        return jsonify({
+            "url": ping_stats["url"],
+            "total_pings": ping_stats["total"],
+            "success": ping_stats["success"],
+            "fail": ping_stats["fail"],
+            "last_time": ping_stats["last_time"],
+            "last_status": ping_stats["last_status"],
+            "history_30": list(ping_stats["history"])[-30:],
+            "thoi_gian": vn_time()
+        })
 
 @app.errorhandler(404)
 def not_found(e):
-    return jsonify({"error":"Sai endpoint. Dùng /thongke/ai, /thongke/dudoan, /ping, /api/tx, /api/history"}), 404
+    return jsonify({"error": "Endpoint không tồn tại. Dùng /thongke/ai, /thongke/dudoan, /ping, /api/tx, /api/history"}), 404
 
 # ---------- MAIN ----------
 def run_flask():
@@ -449,7 +438,7 @@ def run_flask():
 
 async def main():
     print("="*60)
-    print("🎲 SUN.WIN TÀI XỈU VIP - WORM GPT EDITION (FIX LỖI + AI NÂNG CẤP)")
+    print("🎲 SUN.WIN TÀI XỈU VIP - WORM GPT EDITION (FIX LỖI JSON)")
     print("="*60)
     print(f"🌐 BASE URL: {BASE_URL}")
     print(f"🏓 PING URL: {PING_URL}")
