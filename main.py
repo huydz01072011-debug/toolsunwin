@@ -352,8 +352,8 @@ async def ws_loop():
 @app.route('/')
 def index():
     return jsonify({
-        "name": "Sun.Win Tài Xỉu VIP - Worm GPT AI",
-        "version": "5.0",
+        "name": "Sun.Win Tài Xỉu VIP - Worm GPT AI (D0XX1N9)",
+        "version": "6.0",
         "base_url": BASE_URL,
         "time": vn_time(),
         "endpoints": {
