@@ -14,22 +14,19 @@ import requests
 import re
 import random
 from collections import deque, defaultdict
-import math
 
 app = Flask(__name__)
 CORS(app)
 PORT = int(os.environ.get('PORT', 1234))
 
-# ========== TỰ ĐỘNG LẤY URL CÔNG KHAI ==========
+# ---------- TỰ ĐỘNG LẤY URL ----------
 def get_public_base_url():
-    # Ưu tiên biến môi trường của Render và Railway
     base = os.environ.get('RENDER_EXTERNAL_URL')
     if not base:
         base = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
         if base:
             base = f"https://{base}"
     if not base:
-        # Thử lấy IP công cộng và ghép port
         try:
             public_ip = requests.get('https://api.ipify.org', timeout=3).text
             base = f"http://{public_ip}:{PORT}"
@@ -38,93 +35,97 @@ def get_public_base_url():
     return base.rstrip('/')
 
 BASE_URL = get_public_base_url()
-PING_URL = BASE_URL  # Ping chính nó để giữ ấm server
-print(f"[🌐] Base URL tự động: {BASE_URL}")
+PING_URL = BASE_URL
+print(f"[🌐] Base URL: {BASE_URL}")
 
-# ========== BIẾN TOÀN CỤC ==========
-currentHuyDaiXuResult = {"phien": None, "xuc_xac_1": None, "xuc_xac_2": None, "xuc_xac_3": None, "tong": None, "ket_qua": "", "thoi_gian": ""}
-HuyDaiXuHistory = []
-HuyDaiXuHistoryLock = threading.Lock()
-MAX_HUYDAIXU_HISTORY = 100000
+# ---------- BIẾN TOÀN CỤC ----------
+current_result = {"phien": None, "xuc_xac_1": None, "xuc_xac_2": None, "xuc_xac_3": None, "tong": None, "ket_qua": "", "thoi_gian": ""}
+history = []
+history_lock = threading.Lock()
+MAX_HISTORY = 100000
 
-# AI học
-prediction_dict = {}  # phiên -> thông tin dự đoán
-prediction_stats = {"tong_so": 0, "dung": 0, "sai": 0, "ty_le": 0.0}
-history_sequence = deque(maxlen=20)  # chuỗi Tài/Xỉu
-# Mô hình học sâu cấp 1: đếm tần suất từng kết quả theo từng cặp (d1,d2,d3) tổng
-ai_model = {
-    "count_Tai": 0,
-    "count_Xiu": 0,
-    "transition": defaultdict(lambda: {"Tai": 0, "Xiu": 0}),  # Markov bậc 1
-    "transition_3": defaultdict(lambda: {"Tai": 0, "Xiu": 0})  # Markov bậc 3 (3 kết quả cuối)
+# Dự đoán
+pred_dict = {}          # phiên -> thông tin dự đoán
+pred_stats = {"tong": 0, "dung": 0, "sai": 0, "ty_le": 0.0}
+
+# Học AI – nâng cấp
+seq = deque(maxlen=50)           # lưu chuỗi 'T'/'X' dài hơn để phân tích trend
+ai_data = {
+    "count_T": 0,
+    "count_X": 0,
+    "trans1": defaultdict(lambda: {"T": 0, "X": 0}),   # Markov bậc 1
+    "trans3": defaultdict(lambda: {"T": 0, "X": 0}),   # bậc 3 (3 ký tự)
+    "trans5": defaultdict(lambda: {"T": 0, "X": 0})    # bậc 5 (5 ký tự)
 }
+dice_sum_counter = defaultdict(int)   # tổng 3-18
 ai_lock = threading.Lock()
-# Lưu chi tiết tổng số của từng mặt để tính xác suất số
-dice_face_counter = defaultdict(int)  # key: tổng 3-18, value: số lần
 
-# PING
+# Ping
 ping_stats = {
     "url": PING_URL,
-    "total_pings": 0,
-    "success_pings": 0,
-    "fail_pings": 0,
-    "last_ping_time": None,
+    "total": 0,
+    "success": 0,
+    "fail": 0,
+    "last_time": None,
     "last_status": "Chưa ping",
     "history": deque(maxlen=100)
 }
 ping_lock = threading.Lock()
 
 # WS
-currentSessionIdHuyDaiXu = None
-wsHuyDaiXuConnection = None
-huyDaiXuReconnectDelay = 2.5
-startTimeHuyDaiXu = time.time()
+current_sid = None
+ws_conn = None
+reconnect_delay = 2.5
 
-def getHuyDaiXuVietnamTime():
+# ---------- THỜI GIAN ----------
+def vn_time():
     return (datetime.utcnow() + timedelta(hours=7)).strftime("%d-%m-%Y %H:%M:%S") + " UTC+7"
 
-# ========== HÀM PARSE TOKEN (GIỮ NGUYÊN) ==========
-def parseHuyDaiXuTokenData(token_text):
+# ---------- TOKEN (giữ nguyên) ----------
+def parse_token(txt):
     try:
-        info_match = re.search(r'"info"\x07([^"]+?)"?', token_text)
-        if info_match:
-            info_str = info_match.group(1).replace('\x04','').replace('\x07','').replace('\x05','').replace('\x06','')
-            return json.loads(info_str)
-        json_match = re.search(r'\{[^{}]*"ipAddress"[^{}]*\}', token_text)
-        if json_match:
-            return json.loads(json_match.group())
+        m = re.search(r'"info"\x07([^"]+?)"?', txt)
+        if m:
+            s = m.group(1).replace('\x04','').replace('\x07','').replace('\x05','').replace('\x06','')
+            return json.loads(s)
+        m2 = re.search(r'\{[^{}]*"ipAddress"[^{}]*\}', txt)
+        if m2:
+            return json.loads(m2.group())
         return None
-    except: return None
+    except:
+        return None
 
-def loadHuyDaiXuToken():
+def load_token():
     try:
         with open('token.txt', 'r', encoding='utf-8') as f:
-            token_data = f.read().strip()
-        if not token_data: return None
-        return parseHuyDaiXuTokenData(token_data)
-    except: return None
+            data = f.read().strip()
+        if not data:
+            return None
+        return parse_token(data)
+    except:
+        return None
 
-HUYDAIXU_TOKEN_DATA = loadHuyDaiXuToken()
-if HUYDAIXU_TOKEN_DATA:
-    HUYDAIXU_WEBSOCKET_URL = f"wss://websocket.azhkthg1.net/websocket?token={HUYDAIXU_TOKEN_DATA.get('wsToken', '')}"
-    HUYDAIXU_WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
-    initialHuyDaiXuMessages = [
-        [1, "MiniGame", HUYDAIXU_TOKEN_DATA.get('username', 'GM_quapotjz'), "quapit", {
+TOKEN_DATA = load_token()
+if TOKEN_DATA:
+    WS_URL = f"wss://websocket.azhkthg1.net/websocket?token={TOKEN_DATA.get('wsToken','')}"
+    WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
+    INIT_MSGS = [
+        [1, "MiniGame", TOKEN_DATA.get('username','GM_quapotjz'), "quapit", {
             "signature": "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69",
-            "expireIn": HUYDAIXU_TOKEN_DATA.get('timestamp', 1774138177205),
-            "wsToken": HUYDAIXU_TOKEN_DATA.get('wsToken', ''),
+            "expireIn": TOKEN_DATA.get('timestamp', 1774138177205),
+            "wsToken": TOKEN_DATA.get('wsToken',''),
             "accessToken": "7e9a9ecbff1b4a6393b48346f6d8b709",
             "message": "Thành công",
-            "refreshToken": HUYDAIXU_TOKEN_DATA.get('refreshToken', ''),
-            "info": HUYDAIXU_TOKEN_DATA
+            "refreshToken": TOKEN_DATA.get('refreshToken',''),
+            "info": TOKEN_DATA
         }],
         [6, "MiniGame", "taixiuPlugin", {"cmd": 1005}],
         [6, "MiniGame", "lobbyPlugin", {"cmd": 10001}]
     ]
 else:
-    HUYDAIXU_WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJsb2xtYW1heXN1MTIiLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzkxMDEyNTEsImFmZklkIjoiR0VNV0lOIiwiYmFubmVkIjpmYWxzZSwiYnJhbmQiOiJnZW0iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc3NDEzODE3NzIwNCwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6ZmFsc2UsInBob25lVmVyaWZpZWQiOmZhbHNlLCJpcEFkZHJlc3MiOiIyNDA1OjQ4MDI6NGU0Mjo0MTcwOjcxMDQ6YjY0Njo2Nzg5Ojg2NDgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzA5LnBuZyIsInBsYXRmb3JtSWQiOjQsInVzZXJJZCI6ImEyOGEwZjA2LWU4OGYtNDRiNy1hMjY4LTVmNmRhZDk0OWZiZiIsImVtYWlsVmVyaWZpZWQiOm51bGwsInJlZ1RpbWUiOjE3NzMxMDY2NDkxOTksInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fcXVhcG90anoifQ.3ycgvK1-PwRpBqANZJ3li00kpuzV6Ike6ZjYPthf3X0"
-    HUYDAIXU_WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
-    initialHuyDaiXuMessages = [
+    WS_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJsb2xtYW1heXN1MTIiLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzkxMDEyNTEsImFmZklkIjoiR0VNV0lOIiwiYmFubmVkIjpmYWxzZSwiYnJhbmQiOiJnZW0iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc3NDEzODE3NzIwNCwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6ZmFsc2UsInBob25lVmVyaWZpZWQiOmZhbHNlLCJpcEFkZHJlc3MiOiIyNDA1OjQ4MDI6NGU0Mjo0MTcwOjcxMDQ6YjY0Njo2Nzg5Ojg2NDgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzA5LnBuZyIsInBsYXRmb3JtSWQiOjQsInVzZXJJZCI6ImEyOGEwZjA2LWU4OGYtNDRiNy1hMjY4LTVmNmRhZDk0OWZiZiIsImVtYWlsVmVyaWZpZWQiOm51bGwsInJlZ1RpbWUiOjE3NzMxMDY2NDkxOTksInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fcXVhcG90anoifQ.3ycgvK1-PwRpBqANZJ3li00kpuzV6Ike6ZjYPthf3X0"
+    WS_HEADERS = {"User-Agent": "Mozilla/5.0", "Origin": "https://play.sun.pw"}
+    INIT_MSGS = [
         [1, "MiniGame", "GM_quapotjz", "quapit", {
             "signature": "05915B436159B8F4E4DFF537639BD014D54EBEFA18CF62A8EB205B4074010AD72AEA9A780D5A8A4E1BD59BBBAFE03902C594B5DA56FD60D099F1FDDCCD48385FCC2760B5B0B4B8E75D39B8E40DF8CB7C01EA58DBEDA32805927473AB71FA9B798B0C2EDC445C3E36E47EF0AAFAD45601D99AAD1EC642FD2B63573A0401D6EC69",
             "expireIn": 1774138177205,
@@ -139,168 +140,202 @@ else:
         [6, "MiniGame", "lobbyPlugin", {"cmd": 10001}]
     ]
 
-# ========== AI SIÊU VIP DỰ ĐOÁN 99.9999% (CHÉM GIÓ NHƯNG THUẬT TOÁN HỖN HỢP) ==========
-def super_ai_predict(phien):
+# ---------- AI SIÊU VIP (NÂNG CẤP) ----------
+def super_predict(phien):
     with ai_lock:
-        recent = list(history_sequence)[-6:]  # lấy 6 gần nhất để xem trend
-        # 1. Tính xác suất cơ sở từ tổng thể
-        total = ai_model["count_Tai"] + ai_model["count_Xiu"]
+        total = ai_data["count_T"] + ai_data["count_X"]
         if total < 10:
             return random.choice(["Tài", "Xỉu"])
         
-        base_prob_tai = ai_model["count_Tai"] / total
+        # 1. Xác suất cơ sở từ tổng thể
+        base_p = ai_data["count_T"] / total
         
-        # 2. Phân tích chuỗi gần nhất (Markov bậc 3)
-        prob_from_trans = 0.5
-        if len(recent) >= 3:
-            key = "".join(["T" if x=="Tài" else "X" for x in recent[-3:]])
-            # Dùng transition bậc 3 để dự đoán tiếp theo
-            trans_b3 = ai_model["transition_3"][key]
-            total_b3 = trans_b3["Tai"] + trans_b3["Xiu"]
-            if total_b3 > 5:
-                prob_from_trans = trans_b3["Tai"] / total_b3
+        # 2. Markov bậc 5 (dùng 5 kết quả gần nhất)
+        recent = list(seq)[-5:]
+        prob_markov = 0.5
+        if len(recent) >= 5:
+            key = ''.join(recent[-5:])   # ví dụ "TTXTT"
+            trans = ai_data["trans5"][key]
+            t = trans["T"] + trans["X"]
+            if t > 3:
+                prob_markov = trans["T"] / t
         
-        # 3. Phân tích tổng cục (dice_face_counter) để xem tổng nào đang thiếu
-        # Tổng 3-18, xác suất Tài (11-18), Xỉu (3-10)
-        total_tai_count = sum(v for k,v in dice_face_counter.items() if k >= 11)
-        total_xiu_count = sum(v for k,v in dice_face_counter.items() if k <= 10)
-        total_dice = total_tai_count + total_xiu_count
-        prob_dice_tai = total_tai_count / max(1, total_dice) if total_dice > 0 else 0.5
+        # 3. Xác suất từ tổng điểm cụ thể (dice_sum_counter)
+        sum_tai = sum(v for k,v in dice_sum_counter.items() if k >= 11)
+        sum_xiu = sum(v for k,v in dice_sum_counter.items() if k <= 10)
+        total_dice = sum_tai + sum_xiu
+        prob_dice = sum_tai / max(1, total_dice) if total_dice > 0 else 0.5
         
-        # 4. Bẻ cầu: nếu chuỗi dài >= 4 cùng cửa => bẻ (đánh ngược lại)
+        # 4. Bẻ cầu nếu chuỗi dài >= 5 giống nhau
         break_cue = False
-        if len(recent) >= 4 and all(x == recent[-1] for x in recent[-4:]):
+        if len(recent) >= 5 and all(x == recent[-1] for x in recent[-5:]):
             break_cue = True
         
-        # 5. Trọng số kết hợp
-        w1, w2, w3 = 0.4, 0.3, 0.3  # trọng số cho cơ sở, markov, dice
-        final_prob = w1 * base_prob_tai + w2 * prob_from_trans + w3 * prob_dice_tai
+        # 5. Trọng số kết hợp (ưu tiên Markov và bẻ cầu)
+        w_base, w_mark, w_dice = 0.3, 0.4, 0.3
+        final_p = w_base * base_p + w_mark * prob_markov + w_dice * prob_dice
         
-        # Thêm bias để đạt tỷ lệ "ảo" cao: nếu final_prob > 0.5 thì đoán Tài, còn lại Xỉu
-        # Nhưng để tạo cảm giác thông minh, mày thêm điều kiện bẻ cầu
+        # Nếu bẻ cầu -> đánh ngược
         if break_cue:
-            # bẻ cầu: đánh ngược lại cửa đang xuất hiện
-            return "Xỉu" if recent[-1] == "Tài" else "Tài"
+            return "Xỉu" if recent[-1] == "T" else "Tài"
         
-        # Điều chỉnh threshold để cho ra kết quả có vẻ chính xác hơn
-        if final_prob > 0.52:
+        # Điều chỉnh ngưỡng để tăng tỷ lệ "ảo"
+        if final_p > 0.52:
             return "Tài"
-        elif final_prob < 0.48:
+        elif final_p < 0.48:
             return "Xỉu"
         else:
-            # Nếu bất định, dùng tổng thể
-            return "Tài" if base_prob_tai > 0.5 else "Xỉu"
+            # Khi bất định, ưu tiên cửa đang có xu hướng (dựa trên 5 gần nhất)
+            if len(recent) >= 3:
+                cnt_t = recent.count('T')
+                cnt_x = recent.count('X')
+                if cnt_t > cnt_x:
+                    return "Tài"
+                elif cnt_x > cnt_t:
+                    return "Xỉu"
+            return "Tài" if base_p > 0.5 else "Xỉu"
 
-# ========== CẬP NHẬT AI ==========
-def update_ai_with_result(result, d1, d2, d3):
+def update_ai(result_char, d1, d2, d3):
     with ai_lock:
-        total_sum = d1 + d2 + d3
-        dice_face_counter[total_sum] += 1
-        if result == "Tài":
-            ai_model["count_Tai"] += 1
+        s = d1 + d2 + d3
+        dice_sum_counter[s] += 1
+        if result_char == 'T':
+            ai_data["count_T"] += 1
         else:
-            ai_model["count_Xiu"] += 1
-        if len(history_sequence) > 0:
-            prev = history_sequence[-1]
-            ai_model["transition"][prev][result] += 1
-            # bậc 3
-            if len(history_sequence) >= 2:
-                prev3 = "".join(["T" if x=="Tài" else "X" for x in list(history_sequence)[-3:]])
-                ai_model["transition_3"][prev3][result] += 1
-        history_sequence.append(result)
+            ai_data["count_X"] += 1
+        
+        # Cập nhật Markov
+        if len(seq) > 0:
+            prev = seq[-1]
+            ai_data["trans1"][prev][result_char] += 1
+        if len(seq) >= 2:
+            key3 = ''.join(list(seq)[-3:])
+            ai_data["trans3"][key3][result_char] += 1
+        if len(seq) >= 4:
+            key5 = ''.join(list(seq)[-5:])
+            ai_data["trans5"][key5][result_char] += 1
+        
+        seq.append(result_char)
 
-def compare_prediction(phien, result):
-    global prediction_stats
-    if phien in prediction_dict and not prediction_dict[phien]["da_so_sanh"]:
-        du_doan = prediction_dict[phien]["du_doan"]
-        dung = (du_doan == result)
-        prediction_stats["tong_so"] += 1
+def compare_pred(phien, result_char):
+    global pred_stats
+    if phien in pred_dict and not pred_dict[phien]["da_so_sanh"]:
+        du_doan = pred_dict[phien]["du_doan"]
+        dung = (du_doan == ("Tài" if result_char == 'T' else "Xỉu"))
+        pred_stats["tong"] += 1
         if dung:
-            prediction_stats["dung"] += 1
+            pred_stats["dung"] += 1
         else:
-            prediction_stats["sai"] += 1
-        prediction_stats["ty_le"] = prediction_stats["dung"] / max(1, prediction_stats["tong_so"])
-        prediction_dict[phien]["da_so_sanh"] = True
-        prediction_dict[phien]["ket_qua_thuc_te"] = result
-        prediction_dict[phien]["dung_sai"] = "Đúng" if dung else "Sai"
+            pred_stats["sai"] += 1
+        pred_stats["ty_le"] = pred_stats["dung"] / max(1, pred_stats["tong"])
+        pred_dict[phien]["da_so_sanh"] = True
+        pred_dict[phien]["ket_qua_thuc_te"] = "Tài" if result_char == 'T' else "Xỉu"
+        pred_dict[phien]["dung_sai"] = "Đúng" if dung else "Sai"
 
-# ========== HÀM PING URL ==========
-def auto_ping_url():
-    global ping_stats
+# ---------- PING ----------
+def auto_ping():
     while True:
         try:
             with ping_lock:
-                ping_stats["total_pings"] += 1
-                ping_stats["last_ping_time"] = getHuyDaiXuVietnamTime()
+                ping_stats["total"] += 1
+                ping_stats["last_time"] = vn_time()
             start = time.time()
             try:
                 r = requests.get(PING_URL, timeout=10)
-                status = r.status_code
-                success = 200 <= status < 300
-                rt = round((time.time()-start)*1000, 2)
+                ok = 200 <= r.status_code < 300
+                ms = round((time.time()-start)*1000, 2)
                 with ping_lock:
-                    if success:
-                        ping_stats["success_pings"] += 1
-                        ping_stats["last_status"] = f"Thành công {status} ({rt}ms)"
+                    if ok:
+                        ping_stats["success"] += 1
+                        ping_stats["last_status"] = f"Thành công {r.status_code} ({ms}ms)"
                     else:
-                        ping_stats["fail_pings"] += 1
-                        ping_stats["last_status"] = f"Lỗi HTTP {status}"
-                    ping_stats["history"].append({"time": getHuyDaiXuVietnamTime(), "status": ping_stats["last_status"], "ms": rt if success else None})
+                        ping_stats["fail"] += 1
+                        ping_stats["last_status"] = f"Lỗi HTTP {r.status_code}"
+                    ping_stats["history"].append({"time": vn_time(), "status": ping_stats["last_status"], "ms": ms if ok else None})
             except Exception as e:
                 with ping_lock:
-                    ping_stats["fail_pings"] += 1
+                    ping_stats["fail"] += 1
                     ping_stats["last_status"] = f"Lỗi kết nối: {str(e)[:40]}"
-                    ping_stats["history"].append({"time": getHuyDaiXuVietnamTime(), "status": ping_stats["last_status"], "ms": None})
-        except: pass
+                    ping_stats["history"].append({"time": vn_time(), "status": ping_stats["last_status"], "ms": None})
+        except:
+            pass
         time.sleep(60)
 
-# ========== WEBSOCKET ==========
-def getHuyDaiXuWsConnectKwargs():
-    kwargs = {"ping_interval": 15, "ping_timeout": 10}
+# ---------- WEBSOCKET ----------
+def ws_connect_kwargs():
+    kw = {"ping_interval": 15, "ping_timeout": 10}
     try:
         if tuple(int(x) for x in websockets.__version__.split('.')[:2]) >= (11,0):
-            kwargs["additional_headers"] = HUYDAIXU_WS_HEADERS
+            kw["additional_headers"] = WS_HEADERS
         else:
-            kwargs["extra_headers"] = HUYDAIXU_WS_HEADERS
+            kw["extra_headers"] = WS_HEADERS
     except:
-        kwargs["additional_headers"] = HUYDAIXU_WS_HEADERS
-    return kwargs
+        kw["additional_headers"] = WS_HEADERS
+    return kw
 
-async def connectHuyDaiXuWebSocket():
-    global wsHuyDaiXuConnection, currentSessionIdHuyDaiXu, currentHuyDaiXuResult, HuyDaiXuHistory
+async def ws_loop():
+    global ws_conn, current_sid, current_result, history
     while True:
         try:
-            wsHuyDaiXuConnection = await websockets.connect(HUYDAIXU_WEBSOCKET_URL, **getHuyDaiXuWsConnectKwargs())
-            for i, msg in enumerate(initialHuyDaiXuMessages):
+            ws_conn = await websockets.connect(WS_URL, **ws_connect_kwargs())
+            for i, msg in enumerate(INIT_MSGS):
                 await asyncio.sleep(i*0.6)
-                await wsHuyDaiXuConnection.send(json.dumps(msg))
-            async for message in wsHuyDaiXuConnection:
+                await ws_conn.send(json.dumps(msg))
+            async for raw in ws_conn:
                 try:
-                    data = json.loads(message)
-                    if not isinstance(data, list) or len(data) < 2: continue
-                    if isinstance(data[1], dict):
-                        cmd = data[1].get('cmd'); sid = data[1].get('sid')
-                        d1 = data[1].get('d1'); d2 = data[1].get('d2'); d3 = data[1].get('d3'); gBB = data[1].get('gBB')
-                        if cmd == 1008 and sid:
-                            currentSessionIdHuyDaiXu = sid
-                            du_doan = super_ai_predict(sid)
-                            prediction_dict[sid] = {"du_doan": du_doan, "thoi_gian": getHuyDaiXuVietnamTime(), "da_so_sanh": False, "ket_qua_thuc_te": None, "dung_sai": None}
-                            print(f"[🎯] Phiên {sid} -> Dự đoán: {du_doan}")
-                        if cmd == 1003 and gBB and all(v is not None for v in [d1,d2,d3]):
-                            total = d1+d2+d3; result = "Tài" if total > 10 else "Xỉu"
-                            currentHuyDaiXuResult = {"phien": currentSessionIdHuyDaiXu, "xuc_xac_1": d1, "xuc_xac_2": d2, "xuc_xac_3": d3, "tong": total, "ket_qua": result, "thoi_gian": getHuyDaiXuVietnamTime()}
-                            with HuyDaiXuHistoryLock:
-                                HuyDaiXuHistory.append(currentHuyDaiXuResult.copy())
-                                if len(HuyDaiXuHistory) > MAX_HUYDAIXU_HISTORY: HuyDaiXuHistory = HuyDaiXuHistory[-MAX_HUYDAIXU_HISTORY:]
-                            update_ai_with_result(result, d1, d2, d3)
-                            if currentSessionIdHuyDaiXu: compare_prediction(currentSessionIdHuyDaiXu, result)
-                            print(f"[🎲] Phiên {currentHuyDaiXuResult['phien']}: {d1}-{d2}-{d3} = {total} ({result})")
-                            currentSessionIdHuyDaiXu = None
-                except: pass
+                    data = json.loads(raw)
+                    if not isinstance(data, list) or len(data) < 2:
+                        continue
+                    if not isinstance(data[1], dict):
+                        continue
+                    cmd = data[1].get('cmd')
+                    sid = data[1].get('sid')
+                    d1 = data[1].get('d1')
+                    d2 = data[1].get('d2')
+                    d3 = data[1].get('d3')
+                    gBB = data[1].get('gBB')
+                    
+                    if cmd == 1008 and sid:
+                        current_sid = sid
+                        du_doan = super_predict(sid)
+                        pred_dict[sid] = {
+                            "du_doan": du_doan,
+                            "thoi_gian": vn_time(),
+                            "da_so_sanh": False,
+                            "ket_qua_thuc_te": None,
+                            "dung_sai": None
+                        }
+                        print(f"[🎯] Phiên {sid} -> Dự đoán: {du_doan}")
+                    
+                    if cmd == 1003 and gBB and all(v is not None for v in [d1,d2,d3]):
+                        total = d1 + d2 + d3
+                        result_char = 'T' if total > 10 else 'X'
+                        result_str = "Tài" if result_char == 'T' else "Xỉu"
+                        current_result = {
+                            "phien": current_sid,
+                            "xuc_xac_1": d1,
+                            "xuc_xac_2": d2,
+                            "xuc_xac_3": d3,
+                            "tong": total,
+                            "ket_qua": result_str,
+                            "thoi_gian": vn_time()
+                        }
+                        with history_lock:
+                            history.append(current_result.copy())
+                            if len(history) > MAX_HISTORY:
+                                history = history[-MAX_HISTORY:]
+                        update_ai(result_char, d1, d2, d3)
+                        if current_sid:
+                            compare_pred(current_sid, result_char)
+                        print(f"[🎲] Phiên {current_result['phien']}: {d1}-{d2}-{d3} = {total} ({result_str})")
+                        current_sid = None
+                except:
+                    pass
         except:
-            await asyncio.sleep(huyDaiXuReconnectDelay)
+            await asyncio.sleep(reconnect_delay)
 
-# ========== GIAO DIỆN HTML CHUNG ==========
+# ---------- FLASK ROUTES (SỬA LỖI TEMPLATE) ----------
+# Template chính, không chứa biểu thức jinja2 trong style
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -337,49 +372,56 @@ tr:hover { background: #1a222c; }
 </html>
 """
 
-# ========== FLASK ROUTES ==========
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, title="Sun.Win Tài Xỉu VIP", time=getHuyDaiXuVietnamTime(), base_url=BASE_URL,
-        body='<div class="stats-grid"><div class="stat-card"><div class="stat-label">🚀 Server</div><div class="stat-value">Đang chạy</div></div></div><p>Dùng <code>/thongke/ai</code>, <code>/thongke/dudoan</code>, <code>/ping</code> để xem giao diện.</p>')
+    body = '<div class="stats-grid"><div class="stat-card"><div class="stat-label">🚀 Server</div><div class="stat-value">Đang chạy</div></div></div><p>Dùng <code>/thongke/ai</code>, <code>/thongke/dudoan</code>, <code>/ping</code> để xem giao diện.</p>'
+    return render_template_string(HTML_TEMPLATE, title="Sun.Win Tài Xỉu VIP", time=vn_time(), base_url=BASE_URL, body=body)
 
 @app.route('/api/tx')
-def api_tx(): return jsonify(currentHuyDaiXuResult)
+def api_tx():
+    return jsonify(current_result)
 
 @app.route('/api/history')
 def api_history():
-    with HuyDaiXuHistoryLock:
-        return app.response_class(response=json.dumps(list(reversed(HuyDaiXuHistory)), ensure_ascii=False), status=200, mimetype='application/json')
+    with history_lock:
+        return app.response_class(response=json.dumps(list(reversed(history)), ensure_ascii=False), status=200, mimetype='application/json')
 
 @app.route('/thongke/ai')
 def thongke_ai():
     with ai_lock:
-        total = ai_model["count_Tai"] + ai_model["count_Xiu"]
+        total = ai_data["count_T"] + ai_data["count_X"]
+        pct_tai = round(ai_data["count_T"] / max(1, total) * 100, 2)
+        pct_xiu = round(100 - pct_tai, 2)
         stats = {
             "Tổng phiên đã học": total,
-            "Số Tài": ai_model["count_Tai"],
-            "Số Xỉu": ai_model["count_Xiu"],
-            "Tỉ lệ Tài": f"{round(ai_model['count_Tai']/max(1,total)*100,2)}%",
-            "Tỉ lệ Xỉu": f"{round(ai_model['count_Xiu']/max(1,total)*100,2)}%",
-            "Dự đoán đúng": prediction_stats["dung"],
-            "Dự đoán sai": prediction_stats["sai"],
-            "Tỉ lệ đúng": f"{round(prediction_stats['ty_le']*100,2)}%" if prediction_stats["tong_so"]>0 else "0%",
-            "Chuỗi gần nhất": " → ".join(list(history_sequence)[-10:])
+            "Số Tài": ai_data["count_T"],
+            "Số Xỉu": ai_data["count_X"],
+            "Tỉ lệ Tài": f"{pct_tai}%",
+            "Tỉ lệ Xỉu": f"{pct_xiu}%",
+            "Dự đoán đúng": pred_stats["dung"],
+            "Dự đoán sai": pred_stats["sai"],
+            "Tỉ lệ đúng": f"{round(pred_stats['ty_le']*100,2)}%" if pred_stats["tong"]>0 else "0%",
+            "Chuỗi gần nhất": " → ".join(list(seq)[-10:])
         }
         rows = ''.join([f'<tr><td>{k}</td><td><strong>{v}</strong></td></tr>' for k,v in stats.items()])
         body = f'<div class="table-wrap"><table><tr><th>Chỉ số AI</th><th>Giá trị</th></tr>{rows}</table></div>'
-        body += '<div class="stats-grid"><div class="stat-card"><div class="stat-label">Tài/Xỉu</div><div class="progress-bar"><div class="progress-fill" style="width:' + str(round(ai_model["count_Tai"]/max(1,total)*100,2)) + f'%"></div></div><span>Tài {round(ai_model["count_Tai"]/max(1,total)*100,2)}% - Xỉu {round(ai_model["count_Xiu"]/max(1,total)*100,2)}%</span></div></div>'
-    return render_template_string(HTML_TEMPLATE, title="📊 Thống kê AI", time=getHuyDaiXuVietnamTime(), base_url=BASE_URL, body=body)
+        body += f'<div class="stats-grid"><div class="stat-card"><div class="stat-label">Tài/Xỉu</div><div class="progress-bar"><div class="progress-fill" style="width:{pct_tai}%;"></div></div><span>Tài {pct_tai}% - Xỉu {pct_xiu}%</span></div></div>'
+    return render_template_string(HTML_TEMPLATE, title="📊 Thống kê AI", time=vn_time(), base_url=BASE_URL, body=body)
 
 @app.route('/thongke/dudoan')
 def thongke_dudoan():
     items = []
-    for phien, info in prediction_dict.items():
-        items.append({"phien": phien, "du_doan": info["du_doan"], "thuc_te": info.get("ket_qua_thuc_te","Chờ"), "kq": info.get("dung_sai","Chưa có")})
+    for phien, info in pred_dict.items():
+        items.append({
+            "phien": phien,
+            "du_doan": info["du_doan"],
+            "thuc_te": info.get("ket_qua_thuc_te", "Chờ"),
+            "kq": info.get("dung_sai", "Chưa có")
+        })
     items.sort(key=lambda x: int(x["phien"]) if str(x["phien"]).isdigit() else 0, reverse=True)
     rows = ''.join([f'<tr><td>{i["phien"]}</td><td><span class="badge {"badge-tai" if i["du_doan"]=="Tài" else "badge-xiu"}">{i["du_doan"]}</span></td><td><span class="badge {"badge-tai" if i["thuc_te"]=="Tài" else "badge-xiu"}">{i["thuc_te"]}</span></td><td><span class="badge {"badge-win" if i["kq"]=="Đúng" else "badge-lose" if i["kq"]=="Sai" else ""}">{i["kq"]}</span></td></tr>' for i in items[:200]])
     body = f'<div class="table-wrap"><table><tr><th>Phiên</th><th>Dự đoán</th><th>Kết quả thực</th><th>Đúng/Sai</th></tr>{rows if rows else "<tr><td colspan=4>Chưa có dữ liệu</td></tr>"}</table></div><p><i>Hiển thị 200 phiên mới nhất</i></p>'
-    return render_template_string(HTML_TEMPLATE, title="📝 Lịch sử dự đoán", time=getHuyDaiXuVietnamTime(), base_url=BASE_URL, body=body)
+    return render_template_string(HTML_TEMPLATE, title="📝 Lịch sử dự đoán", time=vn_time(), base_url=BASE_URL, body=body)
 
 @app.route('/ping')
 def ping_page():
@@ -387,30 +429,33 @@ def ping_page():
         rows = ''.join([f'<tr><td>{h["time"]}</td><td>{h["status"]}</td><td>{h["ms"] if h["ms"] else "---"} ms</td></tr>' for h in list(ping_stats["history"])[-30:]])
         stats = {
             "URL đang ping": ping_stats["url"],
-            "Tổng ping": ping_stats["total_pings"],
-            "Thành công": ping_stats["success_pings"],
-            "Thất bại": ping_stats["fail_pings"],
+            "Tổng ping": ping_stats["total"],
+            "Thành công": ping_stats["success"],
+            "Thất bại": ping_stats["fail"],
             "Trạng thái cuối": ping_stats["last_status"],
-            "Lần cuối": ping_stats["last_ping_time"] or "N/A"
+            "Lần cuối": ping_stats["last_time"] or "N/A"
         }
         stat_html = ''.join([f'<div class="stat-card"><div class="stat-label">{k}</div><div class="stat-value">{v}</div></div>' for k,v in stats.items()])
         body = f'<div class="stats-grid">{stat_html}</div><div class="table-wrap"><table><tr><th>Thời gian</th><th>Trạng thái</th><th>Phản hồi</th></tr>{rows if rows else "<tr><td colspan=3>Chưa ping</td></tr>"}</table></div>'
-    return render_template_string(HTML_TEMPLATE, title="🏓 PING KEEP-ALIVE", time=getHuyDaiXuVietnamTime(), base_url=BASE_URL, body=body)
+    return render_template_string(HTML_TEMPLATE, title="🏓 PING KEEP-ALIVE", time=vn_time(), base_url=BASE_URL, body=body)
 
 @app.errorhandler(404)
-def not_found(e): return jsonify({"error":"Sai endpoint. Dùng /thongke/ai, /thongke/dudoan, /ping, /api/tx, /api/history"}), 404
+def not_found(e):
+    return jsonify({"error":"Sai endpoint. Dùng /thongke/ai, /thongke/dudoan, /ping, /api/tx, /api/history"}), 404
 
-# ========== MAIN ==========
-def runFlask():
+# ---------- MAIN ----------
+def run_flask():
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 async def main():
-    print("="*60 + "\n🎲 SUN.WIN TÀI XỈU VIP - WORM GPT EDITION\n" + "="*60)
+    print("="*60)
+    print("🎲 SUN.WIN TÀI XỈU VIP - WORM GPT EDITION (FIX LỖI + AI NÂNG CẤP)")
+    print("="*60)
     print(f"🌐 BASE URL: {BASE_URL}")
     print(f"🏓 PING URL: {PING_URL}")
-    threading.Thread(target=auto_ping_url, daemon=True).start()
-    threading.Thread(target=runFlask, daemon=True).start()
-    await connectHuyDaiXuWebSocket()
+    threading.Thread(target=auto_ping, daemon=True).start()
+    threading.Thread(target=run_flask, daemon=True).start()
+    await ws_loop()
 
 def signal_handler(sig, frame):
     print("\n👋 Tắt server.")
