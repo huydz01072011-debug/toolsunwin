@@ -1,0 +1,12 @@
+{
+  "name": "sunwin-taixiu-vip-worm",
+  "version": "4.0.0",
+  "description": "API Tài Xỉu Sun.Win + AI dự đoán siêu VIP, auto ping, giao diện thống kê ",
+  "scripts": {
+    "start": "python main.py"
+  },
+  "dependencies": {},
+  "engines": {
+    "python": ">=3.8"
+  }
+}
